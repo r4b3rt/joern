@@ -1,13 +1,13 @@
 package io.joern.jimple2cpg.querying
 
-import io.joern.jimple2cpg.testfixtures.JimpleCodeToCpgFixture
+import io.joern.jimple2cpg.testfixtures.JimpleCode2CpgFixture
+import io.shiftleft.codepropertygraph.generated.Cpg
 import io.shiftleft.codepropertygraph.generated.nodes.{Call, Unknown}
-import io.shiftleft.semanticcpg.language._
+import io.shiftleft.semanticcpg.language.*
 
-class IfGotoTests extends JimpleCodeToCpgFixture {
+class IfGotoTests extends JimpleCode2CpgFixture {
 
-  override val code: String =
-    """
+  val cpg: Cpg = code("""
       |class Foo {
       |
       |   void foo(int x, int y) {
@@ -27,14 +27,10 @@ class IfGotoTests extends JimpleCodeToCpgFixture {
       |   }
       |
       |}
-      |""".stripMargin
+      |""".stripMargin).cpg
 
   "should identify `goto` blocks" in {
-    cpg.all.collect { case x: Unknown => x }.code.toSet shouldBe Set(
-      "goto [?= $stack6 = y]",
-      "goto [?= i = i + 1]",
-      "goto [?= (branch)]"
-    )
+    cpg.all.collect { case x: Unknown => x }.code.toSetMutable shouldBe Set("goto 9", "goto 5")
   }
 
   "should contain 4 branching nodes at conditional calls" in {
@@ -44,12 +40,7 @@ class IfGotoTests extends JimpleCodeToCpgFixture {
         x.cfgOut.size > 1
       }
       .code
-      .toSet shouldBe Set(
-      "i < 11",
-      "$stack6 >= x",
-      "x <= y",
-      "i >= 10"
-    )
+      .toSetMutable shouldBe Set("i#3 < 11", "$stack4 >= x", "x > y", "i >= 10")
   }
 
 }

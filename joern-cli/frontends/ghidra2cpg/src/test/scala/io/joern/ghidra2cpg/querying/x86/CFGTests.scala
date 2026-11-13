@@ -2,13 +2,13 @@ package io.joern.ghidra2cpg.querying.x86
 
 import io.joern.ghidra2cpg.fixtures.GhidraBinToCpgSuite
 import io.shiftleft.codepropertygraph.generated.nodes.Call
-import io.shiftleft.semanticcpg.language._
+import io.shiftleft.semanticcpg.language.*
 
 class CFGTests extends GhidraBinToCpgSuite {
 
   override def beforeAll(): Unit = {
     super.beforeAll()
-    buildCpgForBin("cfg.bin")
+    buildCpgForBin("linux/x86/64/cfg.bin")
   }
 
   "should have the cfgFirst node with the value set in" in {
@@ -34,7 +34,6 @@ class CFGTests extends GhidraBinToCpgSuite {
       case List(nextIfSkipped: Call, nextIfTaken: Call) =>
         nextIfSkipped.code shouldBe "ADD RAX,0x2"
         nextIfTaken.code shouldBe "MOV RSP,RBP"
-
       case result =>
         fail(s"Expected call nodes `ADD RAX,0x2` and `MOV RSP,RBP` but got $result")
     }

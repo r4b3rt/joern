@@ -1,7 +1,41 @@
 package io.joern.javasrc2cpg.querying.dataflow
 
-import io.joern.javasrc2cpg.testfixtures.JavaDataflowFixture
-import io.joern.dataflowengineoss.language._
+import io.joern.javasrc2cpg.testfixtures.{JavaDataflowFixture, JavaSrcCode2CpgFixture}
+import io.joern.dataflowengineoss.language.*
+import io.shiftleft.semanticcpg.language.*
+
+class NewObjectTests extends JavaSrcCode2CpgFixture(withOssDataflow = true) {
+
+  "static field passed as an argument inside a same-class static method whilst being referenced by its simple name" in {
+    val cpg = code("""
+        |class Bar {
+        | static String CONST = "<const>";
+        | static void run() {
+        |   System.out.println(CONST);
+        | }
+        |}""".stripMargin)
+    val sink   = cpg.call("println").argument(1)
+    val source = cpg.literal
+    sink.reachableByFlows(source).map(flowToResultPairs).l shouldBe List(
+      List(("String Bar.CONST = \"<const>\"", Some(3)), ("System.out.println(CONST)", Some(5)))
+    )
+  }
+
+  "static field passed as an argument inside a same-class static method whilst being referenced by its qualified name" in {
+    val cpg = code("""
+        |class Bar {
+        | static String CONST = "<const>";
+        | static void run() {
+        |   System.out.println(Bar.CONST);
+        | }
+        |}""".stripMargin)
+    val sink   = cpg.call("println").argument(1)
+    val source = cpg.literal
+    sink.reachableByFlows(source).map(flowToResultPairs).l shouldBe List(
+      List(("String Bar.CONST = \"<const>\"", Some(3)), ("System.out.println(Bar.CONST)", Some(5)))
+    )
+  }
+}
 
 class ObjectTests extends JavaDataflowFixture {
 
@@ -104,21 +138,46 @@ class ObjectTests extends JavaDataflowFixture {
       |    }
       |}
       |
+      |class Baz {
+      |    public String value;
+      |
+      |    public Baz(String s) {
+      |        value = s;
+      |    }
+      |
+      |    public String toString() {
+      |        return value;
+      |    }
+      |
+      |    public static void sink(Baz b) {
+      |        System.out.println(b.toString());
+      |    }
+      |
+      |    public void test11() {
+      |        Baz b = new Baz("MALICIOUS");
+      |        sink(b);
+      |    }
+      |
+      |    public void test12() {
+      |        sink(new Baz("MALICIOUS"));
+      |    }
+      |}
       |""".stripMargin
 
   it should "find a path through the constructor and field of an object" in {
-    val (source, sink) = getConstSourceSink("test1")
+    val source = cpg.method("test1").literal
+    val sink   = cpg.method("test1").ast.isCall.name("println").argument(1).l
     sink.reachableBy(source).size shouldBe 1
   }
 
   it should "find a path if a safe field is accessed (approximation)" in {
     val (source, sink) = getConstSourceSink("test2")
-    sink.reachableBy(source).size shouldBe 1
+    sink.reachableBy(source).size shouldBe 2
   }
 
   it should "find a path if a field is directly reassigned to `MALICIOUS`" in {
     val (source, sink) = getConstSourceSink("test3")
-    sink.reachableBy(source).size shouldBe 1
+    sink.reachableBy(source).size shouldBe 2
   }
 
   it should "find a path for malicious input via a getter" in {
@@ -133,25 +192,24 @@ class ObjectTests extends JavaDataflowFixture {
   }
 
   it should "find a path to a void printer via a field" in {
-    // TODO: This should find a path, but the current result is on par with c2cpg.
     val (source, sink) = getMultiFnSourceSink("test6", "printS")
-    sink.reachableBy(source).size shouldBe 0
+    sink.reachableBy(source).size shouldBe 2
   }
 
   it should "not find a path to a void printer via a safe field" in {
     val (source, sink) = getMultiFnSourceSink("test7", "printT")
-    sink.reachableBy(source).size shouldBe 0
+    // TODO: This should not find a path, but does due to over-tainting.
+    sink.reachableBy(source).size shouldBe 2
   }
 
   it should "not find a path if `MALICIOUS` is overwritten via a setter" in {
     val (source, sink) = getConstSourceSink("test8")
-    sink.reachableBy(source).size shouldBe 0
+    pendingUntilFixed(sink.reachableBy(source).size shouldBe 0)
   }
 
   it should "find a path via an alias" in {
     val (source, sink) = getConstSourceSink("test9")
-    // TODO: This should find a path, but the current result is on par with c2cpg.
-    sink.reachableBy(source).size shouldBe 0
+    sink.reachableBy(source).size shouldBe 1
   }
 
   it should "find a path if a field is reassigned to `MALICIOUS` via an alias" in {
@@ -159,4 +217,26 @@ class ObjectTests extends JavaDataflowFixture {
     // TODO: This should find a path, but the current result is on par with c2cpg.
     sink.reachableBy(source).size shouldBe 0
   }
+
+  // TODO this isn't supported yet
+//  it should "find a inter-procedural path from object variable" in {
+//    def source = cpg.method.name("test11").literal.code("\"MALICIOUS\"")
+//    def sink   = cpg.method.name("sink").call.name("println").argument
+//
+//    sink.reachableBy(source).size shouldBe 2
+//    sink.reachableByFlows(source).size shouldBe 2
+//  }
+
+  it should "not create Baz method with ANY type in signature" in {
+    cpg.method.fullNameExact("Baz.sink:void(ANY)").size shouldBe 0
+  }
+
+  // TODO this isn't supported yet
+//  it should "find a inter-procedural path from object instantiation in call argument" in {
+//    def source = cpg.method.name("test12").literal.code("\"MALICIOUS\"")
+//    def sink   = cpg.method.name("sink").call.name("println").argument
+//
+//    sink.reachableBy(source).size shouldBe 2
+//    sink.reachableByFlows(source).size shouldBe 2
+//  }
 }

@@ -1,32 +1,25 @@
 package io.joern.console.workspacehandling
 
-import better.files.Dsl.mkdirs
-import better.files.File
-import org.json4s.DefaultFormats
-import org.json4s.native.Serialization.{read => jsonRead}
+import flatgraph.help.Table.AvailableWidthProvider
 
-import java.nio.file.Path
+import java.nio.file.{Files, Path, Paths}
 import scala.collection.mutable.ListBuffer
 import scala.util.{Failure, Success, Try}
 
-/**
-  * This component loads a workspace from disk and creates
-  * a corresponding `Workspace` object.
-  * */
-abstract class WorkspaceLoader[ProjectType <: Project] {
+/** This component loads a workspace from disk and creates a corresponding `Workspace` object.
+  */
+abstract class WorkspaceLoader[ProjectType <: Project](implicit availableWidthProvider: AvailableWidthProvider) {
 
-  /**
-    * Initialize workspace from a directory
-    * @param path path to the directory
-    * */
+  /** Initialize workspace from a directory
+    * @param path
+    *   path to the directory
+    */
   def load(path: String): Workspace[ProjectType] = {
-    val dirFile = File(path)
-    val dirPath = dirFile.path.toAbsolutePath
+    val dirFile = Paths.get(path)
+    val dirPath = dirFile.toAbsolutePath
 
-    if (!dirFile.exists) {
-      println(s"creating workspace directory: ${dirFile.path.toString}")
-      mkdirs(dirFile)
-    }
+    Files.createDirectories(Paths.get(path))
+
     new Workspace(ListBuffer.from(loadProjectsFromFs(dirPath)))
   }
 
@@ -45,7 +38,7 @@ abstract class WorkspaceLoader[ProjectType <: Project] {
       case Success(v) => Some(v)
       case Failure(e) =>
         System.err.println(s"Error loading project at $path - skipping: ")
-        System.err.println(e)
+        e.printStackTrace
         None
     }
   }
@@ -53,13 +46,11 @@ abstract class WorkspaceLoader[ProjectType <: Project] {
   def createProject(projectFile: ProjectFile, path: Path): ProjectType
 
   private val PROJECTFILE_NAME = "project.json"
-  implicit val formats: DefaultFormats.type = DefaultFormats
 
   private def readProjectFile(projectDirName: Path): ProjectFile = {
     // TODO see `writeProjectFile`
-    val content = File(projectDirName.resolve(PROJECTFILE_NAME)).contentAsString
-    val map = jsonRead[Map[String, String]](content)
-    ProjectFile(map("inputPath"), map("name"))
+    val data = ujson.read(projectDirName.resolve(PROJECTFILE_NAME))
+    ProjectFile(data("inputPath").str, data("name").str)
   }
 
 }

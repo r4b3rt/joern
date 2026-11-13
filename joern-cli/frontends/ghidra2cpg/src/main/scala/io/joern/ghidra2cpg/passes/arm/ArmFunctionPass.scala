@@ -1,34 +1,43 @@
 package io.joern.ghidra2cpg.passes.arm
 
 import ghidra.program.model.listing.{Function, Program}
-import io.joern.ghidra2cpg.Decompiler
+import io.joern.ghidra2cpg.utils.Decompiler
 import io.joern.ghidra2cpg.passes.FunctionPass
 import io.joern.ghidra2cpg.processors.ArmProcessor
-import io.joern.ghidra2cpg.utils.Nodes.{checkIfExternal, createMethodNode, createReturnNode}
-import io.shiftleft.codepropertygraph.Cpg
-import io.shiftleft.codepropertygraph.generated.EdgeTypes
-import io.shiftleft.passes.{DiffGraph, IntervalKeyPool}
+import io.joern.ghidra2cpg.utils.Utils.{createMethodNode, createReturnNode}
+import io.shiftleft.codepropertygraph.generated.nodes.NewBlock
+import io.shiftleft.codepropertygraph.generated.{Cpg, EdgeTypes, nodes}
 
-class ArmFunctionPass(currentProgram: Program,
-                      filename: String,
-                      function: Function,
-                      cpg: Cpg,
-                      keyPool: IntervalKeyPool,
-                      decompiler: Decompiler)
-    extends FunctionPass(new ArmProcessor, currentProgram, function, cpg, keyPool, decompiler) {
+import scala.util.control.NonFatal
 
-  override def runOnPart(part: String): Iterator[DiffGraph] = {
-    methodNode = Some(
-      createMethodNode(decompiler, function, filename, checkIfExternal(currentProgram, function.getName)))
-    diffGraph.addNode(methodNode.get)
-    diffGraph.addNode(blockNode)
-    diffGraph.addEdge(methodNode.get, blockNode, EdgeTypes.AST)
-    val methodReturn = createReturnNode()
-    diffGraph.addNode(methodReturn)
-    diffGraph.addEdge(methodNode.get, methodReturn, EdgeTypes.AST)
-    handleParameters()
-    handleLocals()
-    handleBody()
-    Iterator(diffGraph.build())
+class ArmFunctionPass(
+  currentProgram: Program,
+  filename: String,
+  functions: List[Function],
+  cpg: Cpg,
+  decompiler: Decompiler
+) extends FunctionPass(ArmProcessor, currentProgram, functions, cpg, decompiler) {
+
+  override def runOnPart(diffGraphBuilder: DiffGraphBuilder, function: Function): Unit = {
+    val localDiffGraph = Cpg.newDiffGraphBuilder
+    // we need it just once with default settings
+    val blockNode: NewBlock = nodes.NewBlock().code("").order(0)
+    try {
+      val methodNode =
+        createMethodNode(decompiler, function, filename)
+      val methodReturn = createReturnNode()
+      localDiffGraph.addNode(methodNode)
+      localDiffGraph.addNode(blockNode)
+      localDiffGraph.addEdge(methodNode, blockNode, EdgeTypes.AST)
+      localDiffGraph.addNode(methodReturn)
+      localDiffGraph.addEdge(methodNode, methodReturn, EdgeTypes.AST)
+      handleParameters(localDiffGraph, function, methodNode)
+      handleLocals(localDiffGraph, function, blockNode)
+      handleBody(localDiffGraph, function, methodNode, blockNode)
+    } catch {
+      case NonFatal(exception) =>
+        exception.printStackTrace()
+    }
+    diffGraphBuilder.absorb(localDiffGraph)
   }
 }

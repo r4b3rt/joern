@@ -1,11 +1,10 @@
 package io.joern.scanners.c
 
-import io.joern.scanners._
+import io.joern.scanners.*
 import io.shiftleft.codepropertygraph.generated.Operators
-import io.joern.console._
-import io.joern.console._
-import io.joern.macros.QueryMacros._
-import io.shiftleft.semanticcpg.language._
+import io.joern.console.*
+import io.joern.macros.QueryMacros.*
+import io.shiftleft.semanticcpg.language.*
 
 object SignedLeftShift extends QueryBundle {
 
@@ -39,6 +38,10 @@ object SignedLeftShift extends QueryBundle {
           |}
           |
           |void bad3(int val) {
+          |  val << val;
+          |}
+          |
+          |void bad4(signed long val) {
           |  val << val;
           |}
           |""".stripMargin),

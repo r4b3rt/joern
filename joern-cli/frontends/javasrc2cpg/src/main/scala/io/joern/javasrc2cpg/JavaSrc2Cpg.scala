@@ -1,50 +1,75 @@
 package io.joern.javasrc2cpg
 
-import io.joern.javasrc2cpg.passes.AstCreationPass
-import io.shiftleft.codepropertygraph.Cpg
+import io.joern.javasrc2cpg.passes.{AstCreationPass, OuterClassRefPass, TypeInferencePass}
+import io.joern.x2cpg.SourceFiles
+import io.joern.x2cpg.X2Cpg.withNewEmptyCpg
+import io.joern.x2cpg.passes.frontend.{JavaConfigFileCreationPass, MetaDataPass, TypeNodePass}
+import io.joern.x2cpg.X2CpgFrontend
+import io.joern.x2cpg.frontendspecific.javasrc2cpg.JvmDefaultIgnoredFolders
+import io.shiftleft.codepropertygraph.generated.Cpg
 import io.shiftleft.codepropertygraph.generated.Languages
-import io.shiftleft.passes.IntervalKeyPool
-import io.shiftleft.semanticcpg.passes.frontend.{MetaDataPass, TypeNodePass}
-import io.shiftleft.x2cpg.SourceFiles
-import io.shiftleft.x2cpg.X2Cpg.newEmptyCpg
+import org.slf4j.LoggerFactory
 
-import scala.jdk.CollectionConverters.EnumerationHasAsScala
+import java.util.regex.Pattern
+import scala.util.Try
+import scala.util.matching.Regex
 
-object JavaSrc2Cpg {
-  val language: String = Languages.JAVASRC
-
-  def apply(): JavaSrc2Cpg = new JavaSrc2Cpg()
-}
-
-class JavaSrc2Cpg {
-
+class JavaSrc2Cpg extends X2CpgFrontend {
   import JavaSrc2Cpg._
 
-  /** Create CPG for Java source code at `sourceCodePath` and store the
-    * CPG at `outputPath`. If `outputPath` is `None`, the CPG is created
-    * in-memory.
-    */
-  def createCpg(
-      sourceCodePath: String,
-      outputPath: Option[String] = None
-  ): Cpg = {
+  override type ConfigType = Config
+  override val defaultConfig = DefaultConfig
 
-    val cpg = newEmptyCpg(outputPath)
-    val metaDataKeyPool = new IntervalKeyPool(1, 100)
-    val typesKeyPool = new IntervalKeyPool(100, 1000100)
-    val methodKeyPool = new IntervalKeyPool(first = 1000100, last = Long.MaxValue)
-
-    new MetaDataPass(cpg, language, Some(metaDataKeyPool)).createAndApply()
-
-    val sourceFileExtensions = Set(".java")
-    val sourceFileNames = SourceFiles.determine(Set(sourceCodePath), sourceFileExtensions)
-    val astCreator = new AstCreationPass(sourceCodePath, sourceFileNames, cpg, methodKeyPool)
-    astCreator.createAndApply()
-
-    new TypeNodePass(astCreator.global.usedTypes.keys().asScala.toList, cpg, Some(typesKeyPool))
-      .createAndApply()
-
-    cpg
+  override def createCpg(config: Config): Try[Cpg] = {
+    withNewEmptyCpg(config.outputPath, config: Config) { (cpg, config) =>
+      new MetaDataPass(cpg, language, config.inputPath).createAndApply()
+      val astCreationPass = new AstCreationPass(config, cpg)
+      astCreationPass.createAndApply()
+      astCreationPass.sourceParser.cleanupDelombokOutput()
+      astCreationPass.clearJavaParserCaches()
+      astCreationPass.closeTypeSolvers()
+      new OuterClassRefPass(cpg).createAndApply()
+      JavaConfigFileCreationPass(cpg, config = config).createAndApply()
+      if (!config.skipTypeInfPass) {
+        TypeNodePass.withRegisteredTypes(astCreationPass.usedTypes(), cpg).createAndApply()
+        new TypeInferencePass(cpg).createAndApply()
+      }
+    }
   }
 
+}
+
+object JavaSrc2Cpg {
+  val language: String                  = Languages.JAVASRC
+  val sourceFileExtensions: Set[String] = Set(".java")
+
+  val DefaultIgnoredFilesRegex: List[Regex] = JvmDefaultIgnoredFolders
+  val DefaultConfig: Config                 = Config()
+
+  def showEnv(): Unit = {
+    JavaSrcEnvVar.values.foreach { envVar =>
+      val currentValue = sys.env.getOrElse(envVar.name, "<unset>")
+      println(s"${envVar.name}:")
+      println(s"\tDescription  : ${envVar.description}")
+      println(s"\tCurrent value: $currentValue")
+    }
+  }
+
+  enum JavaSrcEnvVar(val name: String, val description: String) {
+    case JdkPath
+        extends JavaSrcEnvVar(
+          "JAVASRC_JDK_PATH",
+          "Path to the JDK home used for retrieving type information about builtin Java types."
+        )
+    case FetchDependencies
+        extends JavaSrcEnvVar(
+          "JAVASRC_FETCH_DEPENDENCIES",
+          "If set, javasrc2cpg will fetch dependencies regardless of the --fetch-dependencies flag."
+        )
+    case EnableVerboseTypeLogging
+        extends JavaSrcEnvVar(
+          "JAVASRC_ENABLE_VERBOSE_TYPE_LOGGING",
+          "If set, javasrc2cpg will log all types found across JarTypeSolvers. THIS WILL IMPACT PERFORMANCE AND LOG SIZE AND SHOULD ONLY BE USED FOR DEBUGGING SPECIFIC ISSUES!"
+        )
+  }
 }

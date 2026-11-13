@@ -1,27 +1,65 @@
 package io.joern.console
 
-import better.files.Dsl._
-import better.files._
-import io.joern.console.testing._
-import io.shiftleft.semanticcpg.language._
-import io.shiftleft.semanticcpg.layers.{Base, CallGraph, ControlFlow, LayerCreator, LayerCreatorContext, TypeRelations}
+import io.joern.console.testing.*
+import io.joern.x2cpg.X2Cpg.defaultOverlayCreators
+import io.joern.x2cpg.layers.Base
+import io.joern.x2cpg.layers.CallGraph
+import io.joern.x2cpg.layers.ControlFlow
+import io.joern.x2cpg.layers.TypeRelations
+import io.shiftleft.semanticcpg.utils.FileUtil.*
+import io.shiftleft.semanticcpg.language.*
+import io.shiftleft.semanticcpg.layers.LayerCreator
+import io.shiftleft.semanticcpg.layers.LayerCreatorContext
+import io.shiftleft.semanticcpg.utils.FileUtil
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
+import org.scalatest.Ignore
+import org.scalatest.Tag
 
+import java.io.BufferedInputStream
 import java.io.FileOutputStream
+import java.io.StreamTokenizer
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
 import java.util.zip.ZipOutputStream
+import scala.util.Failure
+import scala.util.Properties
+import scala.util.Success
 import scala.util.Try
+import scala.util.Using
 
 class ConsoleTests extends AnyWordSpec with Matchers {
 
+  // Some tests here are copying stuff within TEMP which is not allowed within the Windows GITHUB actions runners.
+  private object NotInWindowsRunners
+      extends Tag(
+        if (!Paths.get(Properties.tmpDir).toString.contains(":\\Users\\RUNNER~1\\AppData\\Local\\Temp")) ""
+        else classOf[Ignore].getName
+      )
+
   "importCode" should {
-    "provide overview of available language modules" in ConsoleFixture() { (console, _) =>
-      console.importCode.toString.contains("| C") shouldBe true
+    "warn about non-existent dir" in ConsoleFixture() { (console, _) =>
+      val nonExistentDir = "/does/not/exist/"
+      intercept[ConsoleException] {
+        console.importCode(nonExistentDir)
+      }.getMessage shouldBe s"Input path does not exist: '$nonExistentDir'"
+      intercept[ConsoleException] {
+        console.importCode.c(nonExistentDir)
+      }.getMessage shouldBe s"Input path does not exist: '$nonExistentDir'"
+      intercept[ConsoleException] {
+        console.importCode.jssrc(nonExistentDir)
+      }.getMessage shouldBe s"Input path does not exist: '$nonExistentDir'"
+      intercept[ConsoleException] {
+        console.importCode.swiftsrc(nonExistentDir)
+      }.getMessage shouldBe s"Input path does not exist: '$nonExistentDir'"
+      intercept[ConsoleException] {
+        console.importCode.rust(nonExistentDir)
+      }.getMessage shouldBe s"Input path does not exist: '$nonExistentDir'"
     }
 
-    "allow importing code with specific module (fuzzyc2cpg)" in ConsoleFixture() { (console, codeDir) =>
-      console.importCode.oldc(codeDir.toString)
-      console.workspace.numberOfProjects shouldBe 1
+    "provide overview of available language modules" in ConsoleFixture() { (console, _) =>
+      console.importCode.toString should include("testCFrontend")
     }
 
     "allow importing code with specific module (c2cpg)" in ConsoleFixture() { (console, codeDir) =>
@@ -33,49 +71,93 @@ class ConsoleTests extends AnyWordSpec with Matchers {
       console.importCode(codeDir.toString)
       console.workspace.numberOfProjects shouldBe 1
       Set("main", "bar").subsetOf(console.cpg.method.name.toSet) shouldBe true
-      console.project.appliedOverlays shouldBe List(Base.overlayName,
-                                                    ControlFlow.overlayName,
-                                                    TypeRelations.overlayName,
-                                                    CallGraph.overlayName)
-      console.project.availableOverlays.toSet shouldBe Set(Base.overlayName,
-                                                           ControlFlow.overlayName,
-                                                           TypeRelations.overlayName,
-                                                           CallGraph.overlayName)
+      console.project.appliedOverlays shouldBe List(
+        Base.overlayName,
+        ControlFlow.overlayName,
+        TypeRelations.overlayName,
+        CallGraph.overlayName
+      )
+      console.project.availableOverlays.toSet shouldBe Set(
+        Base.overlayName,
+        ControlFlow.overlayName,
+        TypeRelations.overlayName,
+        CallGraph.overlayName
+      )
     }
 
-    "allow importing code from file with defines and additional args" in ConsoleFixture() { (console, codeDir) =>
-      val code =
-        """
+    "allow importing code from file with defines and additional args" taggedAs NotInWindowsRunners in ConsoleFixture() {
+      (console, codeDir) =>
+        val code =
+          """
           |#ifdef D
           |int foo() {};
           |#endif
           |""".stripMargin
-      File.usingTemporaryFile("console", suffix = ".c", parent = Some(codeDir)) { file =>
-        file.write(code)
-        console.importCode.c(inputPath = codeDir.toString)
+        FileUtil.usingTemporaryFile("console", suffix = ".c", parent = Option(codeDir)) { file =>
+          Files.writeString(file, code)
+          console.importCode.c(inputPath = codeDir.toString)
+          // importing without args will yield foo because we parse behind inactive defines
+          Set("foo").subsetOf(console.cpg.method.name.toSet) shouldBe true
+
+          // importing with args should yield foo
+          console.importCode.c(inputPath = codeDir.toString, args = List("--define", "D"))
+          Set("foo").subsetOf(console.cpg.method.name.toSet) shouldBe true
+        }
+    }
+
+    "allow importing code from string with defines and additional args" taggedAs NotInWindowsRunners in ConsoleFixture() {
+      (console, _) =>
+        val code =
+          """
+          |#ifdef D
+          |int foo() {};
+          |#endif
+          |""".stripMargin
         // importing without args should not yield foo
-        Set("foo").subsetOf(console.cpg.method.name.toSet) shouldBe false
+        console.importCode.c.fromString(code)
+        // importing without args will yield foo because we parse behind inactive defines
+        Set("foo").subsetOf(console.cpg.method.name.toSet) shouldBe true
 
         // importing with args should yield foo
-        console.importCode.c(inputPath = codeDir.toString(), args = List("--define", "D"))
+        console.importCode.c.fromString(code, List("--define", "D"))
+        Set("foo").subsetOf(console.cpg.method.name.toSet) shouldBe true
+    }
+
+    "allow importing code from file with JS frontend via apply" in ConsoleFixture() { (console, _) =>
+      val code = "function foo() {};"
+      FileUtil.usingTemporaryFile("consoleTests", ".js") { tmpFile =>
+        Files.writeString(tmpFile, code)
+        console.importCode(tmpFile.toString)
         Set("foo").subsetOf(console.cpg.method.name.toSet) shouldBe true
       }
     }
 
-    "allow importing code from string with defines and additional args" in ConsoleFixture() { (console, _) =>
-      val code =
-        """
-          |#ifdef D
-          |int foo() {};
-          |#endif
-          |""".stripMargin
-      // importing without args should not yield foo
-      console.importCode.c.fromString(code)
-      Set("foo").subsetOf(console.cpg.method.name.toSet) shouldBe false
+    "allow importing code from file with JS frontend" taggedAs NotInWindowsRunners in ConsoleFixture() { (console, _) =>
+      val code = "function foo() {};"
+      FileUtil.usingTemporaryFile("consoleTests", ".js") { tmpFile =>
+        Files.writeString(tmpFile, code)
+        console.importCode.jssrc(tmpFile.toString)
+        Set("foo").subsetOf(console.cpg.method.name.toSet) shouldBe true
+      }
+    }
 
-      // importing with args should yield foo
-      console.importCode.c.fromString(code, List("--define", "D"))
-      Set("foo").subsetOf(console.cpg.method.name.toSet) shouldBe true
+    "allow importing code from file with Swift frontend via apply" in ConsoleFixture() { (console, _) =>
+      val code = "func foo() {};"
+      FileUtil.usingTemporaryFile("consoleTests", ".swift") { tmpFile =>
+        Files.writeString(tmpFile, code)
+        console.importCode(tmpFile.toString)
+        Set("foo").subsetOf(console.cpg.method.name.toSet) shouldBe true
+      }
+    }
+
+    "allow importing code from file with Swift frontend" taggedAs NotInWindowsRunners in ConsoleFixture() {
+      (console, _) =>
+        val code = "func foo() {};"
+        FileUtil.usingTemporaryFile("consoleTests", ".swift") { tmpFile =>
+          Files.writeString(tmpFile, code)
+          console.importCode.swiftsrc(tmpFile.toString)
+          Set("foo").subsetOf(console.cpg.method.name.toSet) shouldBe true
+        }
     }
 
     "allow importing code and setting project name" in ConsoleFixture() { (console, codeDir) =>
@@ -88,10 +170,12 @@ class ConsoleTests extends AnyWordSpec with Matchers {
           p.cpg should not be empty
         case None => fail()
       }
-      console.project.appliedOverlays shouldBe List(Base.overlayName,
-                                                    ControlFlow.overlayName,
-                                                    TypeRelations.overlayName,
-                                                    CallGraph.overlayName)
+      console.project.appliedOverlays shouldBe List(
+        Base.overlayName,
+        ControlFlow.overlayName,
+        TypeRelations.overlayName,
+        CallGraph.overlayName
+      )
     }
 
     "allow importing multiple code bases" in ConsoleFixture() { (console, codeDir) =>
@@ -99,14 +183,18 @@ class ConsoleTests extends AnyWordSpec with Matchers {
       console.importCode(codeDir.toString, "bar")
       console.workspace.numberOfProjects shouldBe 2
       console.project.name shouldBe "bar"
-      console.project.appliedOverlays shouldBe List(Base.overlayName,
-                                                    ControlFlow.overlayName,
-                                                    TypeRelations.overlayName,
-                                                    CallGraph.overlayName)
-      console.workspace.project("foo").get.appliedOverlays shouldBe List(Base.overlayName,
-                                                                         ControlFlow.overlayName,
-                                                                         TypeRelations.overlayName,
-                                                                         CallGraph.overlayName)
+      console.project.appliedOverlays shouldBe List(
+        Base.overlayName,
+        ControlFlow.overlayName,
+        TypeRelations.overlayName,
+        CallGraph.overlayName
+      )
+      console.workspace.project("foo").get.appliedOverlays shouldBe List(
+        Base.overlayName,
+        ControlFlow.overlayName,
+        TypeRelations.overlayName,
+        CallGraph.overlayName
+      )
     }
 
     "set project to active" in ConsoleFixture() { (console, codeDir) =>
@@ -124,96 +212,95 @@ class ConsoleTests extends AnyWordSpec with Matchers {
     }
 
     "convert legacy CPGs on import" in ConsoleFixture() { (console, _) =>
-      File.usingTemporaryFile("console") { file =>
+      FileUtil.usingTemporaryFile("console") { file =>
         new ZipOutputStream(new FileOutputStream(file.toString)).close()
         val projectName = "myproject"
-        val cpg = console.importCpg(file.toString, projectName)
+        val cpg         = console.importCpg(file.toString, projectName)
         console.workspace.numberOfProjects shouldBe 1
-        console.workspace.projectByCpg(cpg.get).map(_.name) shouldBe Some(projectName)
+        console.workspace.projectByCpg(cpg.get).map(_.name) shouldBe Option(projectName)
         console.project.appliedOverlays shouldBe List()
       }
     }
 
     "handle broken legacy CPG gracefully" in ConsoleFixture() { (console, _) =>
-      File.usingTemporaryFile("console") { file =>
-        file.write("PK")
+      FileUtil.usingTemporaryFile("console") { file =>
+        Files.writeString(file, "PK")
         console.importCpg(file.toString)
       }
     }
 
     "gracefully handle broken CPGs" in ConsoleFixture() { (console, _) =>
-      File.usingTemporaryFile("console") { file =>
-        file.writeBytes(List[Byte]('F', 'O').iterator)
+      FileUtil.usingTemporaryFile("console") { file =>
+        FileUtil.writeBytes(file, List[Byte]('F', 'O'))
         console.importCpg(file.toString)
         console.workspace.numberOfProjects shouldBe 0
       }
     }
 
-    "allow importing an existing CPG" in ConsoleFixture() { (console, codeDir) =>
-      val tmpCpg = createStandaloneCpg(console, codeDir)
-      try {
+    "allow importing an existing CPG" taggedAs NotInWindowsRunners in ConsoleFixture() { (console, codeDir) =>
+      WithStandaloneCpg(console, codeDir) { tmpCpg =>
         console.importCpg(tmpCpg.toString)
         console.workspace.numberOfProjects shouldBe 1
         Set("main", "bar").subsetOf(console.cpg.method.name.toSet) shouldBe true
-        console.project.appliedOverlays shouldBe List(Base.overlayName,
-                                                      ControlFlow.overlayName,
-                                                      TypeRelations.overlayName,
-                                                      CallGraph.overlayName)
-      } finally {
-        Some(tmpCpg).find(_.exists).foreach(_.delete())
+        console.project.appliedOverlays shouldBe List(
+          Base.overlayName,
+          ControlFlow.overlayName,
+          TypeRelations.overlayName,
+          CallGraph.overlayName
+        )
       }
     }
 
-    "allow importing an existing CPG with custom project name" in ConsoleFixture() { (console, codeDir) =>
-      val tmpCpg = createStandaloneCpg(console, codeDir)
-      try {
-        console.importCpg(tmpCpg.toString, "foobar")
-        console.workspace.numberOfProjects shouldBe 1
-        console.workspace.project("foobar") should not be empty
-        Set("main", "bar").subsetOf(console.cpg.method.name.toSet) shouldBe true
-      } finally {
-        Some(tmpCpg).find(_.exists).foreach(_.delete())
-      }
+    "allow importing an existing CPG with custom project name" taggedAs NotInWindowsRunners in ConsoleFixture() {
+      (console, codeDir) =>
+        WithStandaloneCpg(console, codeDir) { tmpCpg =>
+          console.importCpg(tmpCpg.toString, "foobar")
+          console.workspace.numberOfProjects shouldBe 1
+          console.workspace.project("foobar") should not be empty
+          Set("main", "bar").subsetOf(console.cpg.method.name.toSet) shouldBe true
+        }
     }
 
-    "allow importing two CPGs with the same filename but different paths" in ConsoleFixture() { (console, codeDir) =>
-      val cpgFile = createStandaloneCpg(console, codeDir)
-      File.usingTemporaryDirectory("console") { dir1 =>
-        File.usingTemporaryDirectory("console") { dir2 =>
-          File.usingTemporaryDirectory("console") { dir3 =>
-            val cpg1Path = dir1.path.resolve("cpg.bin")
-            val cpg2Path = dir2.path.resolve("cpg.bin")
-            val cpg3Path = dir3.path.resolve("cpg.bin")
-            cp(cpgFile, cpg1Path)
-            cp(cpgFile, cpg2Path)
-            cp(cpgFile, cpg3Path)
-            console.importCpg(cpg1Path.toString)
-            console.importCpg(cpg2Path.toString)
-            console.importCpg(cpg3Path.toString)
-            console.workspace.numberOfProjects shouldBe 3
-            console.workspace.project(cpg1Path.toFile.getName) should not be empty
-            console.workspace.project(cpg1Path.toFile.getName + "1") should not be empty
-            console.workspace.project(cpg1Path.toFile.getName + "2") should not be empty
-            console.workspace.project(cpg1Path.toFile.getName + "12") shouldBe empty
+    "allow importing two CPGs with the same filename but different paths" taggedAs NotInWindowsRunners in ConsoleFixture() {
+      (console, codeDir) =>
+        WithStandaloneCpg(console, codeDir) { tmpCpg =>
+          FileUtil.usingTemporaryDirectory("console") { dir1 =>
+            FileUtil.usingTemporaryDirectory("console") { dir2 =>
+              FileUtil.usingTemporaryDirectory("console") { dir3 =>
+                val cpg1Path = dir1.resolve("cpg.bin")
+                val cpg2Path = dir2.resolve("cpg.bin")
+                val cpg3Path = dir3.resolve("cpg.bin")
+                FileUtil.copyFiles(tmpCpg, cpg1Path)
+                FileUtil.copyFiles(tmpCpg, cpg2Path)
+                FileUtil.copyFiles(tmpCpg, cpg3Path)
+                console.importCpg(cpg1Path.toString)
+                console.importCpg(cpg2Path.toString)
+                console.importCpg(cpg3Path.toString)
+                console.workspace.numberOfProjects shouldBe 3
+                console.workspace.project(cpg1Path.toFile.getName) should not be empty
+                console.workspace.project(s"${cpg1Path.toFile.getName}1") should not be empty
+                console.workspace.project(s"${cpg1Path.toFile.getName}2") should not be empty
+                console.workspace.project(s"${cpg1Path.toFile.getName}12") shouldBe empty
+              }
+            }
           }
         }
-      }
     }
 
-    "overwrite project if a project for the inputPath exists" in ConsoleFixture() { (console, codeDir) =>
-      val tmpCpg = createStandaloneCpg(console, codeDir)
-      try {
-        console.importCpg(tmpCpg.toString)
-        console.importCpg(tmpCpg.toString)
-        console.workspace.numberOfProjects shouldBe 1
-        Set("main", "bar").subsetOf(console.cpg.method.name.toSet) shouldBe true
-        console.project.appliedOverlays shouldBe List(Base.overlayName,
-                                                      ControlFlow.overlayName,
-                                                      TypeRelations.overlayName,
-                                                      CallGraph.overlayName)
-      } finally {
-        Some(tmpCpg).find(_.exists).foreach(_.delete())
-      }
+    "overwrite project if a project for the inputPath exists" taggedAs NotInWindowsRunners in ConsoleFixture() {
+      (console, codeDir) =>
+        WithStandaloneCpg(console, codeDir) { tmpCpg =>
+          console.importCpg(tmpCpg.toString)
+          console.importCpg(tmpCpg.toString)
+          console.workspace.numberOfProjects shouldBe 1
+          Set("main", "bar").subsetOf(console.cpg.method.name.toSet) shouldBe true
+          console.project.appliedOverlays shouldBe List(
+            Base.overlayName,
+            ControlFlow.overlayName,
+            TypeRelations.overlayName,
+            CallGraph.overlayName
+          )
+        }
     }
   }
 
@@ -221,24 +308,25 @@ class ConsoleTests extends AnyWordSpec with Matchers {
     "allow opening an already open project to make it active" in ConsoleFixture() { (console, codeDir) =>
       val projectName = "myproject"
       console.importCode(codeDir.toString, projectName)
-      console.importCpg(codeDir.path.resolve("cpg.bin").toString, "foo")
+      console.importCpg(codeDir.resolve("cpg.bin").toString, "foo")
       val project = console.open(projectName)
       project match {
         case Some(p) =>
           p.name shouldBe projectName
-          console.workspace.projectByCpg(p.cpg.get).map(_.name) shouldBe Some(projectName)
+          console.workspace.projectByCpg(p.cpg.get).map(_.name) shouldBe Option(projectName)
         case None => fail()
       }
     }
 
-    "allow closing and then opening a project again" in ConsoleFixture() { (console, codeDir) =>
-      val projectName = "myproject"
-      console.importCode(codeDir.toString, projectName)
-      console.close(projectName).get.cpg shouldBe empty
-      console.open(projectName).get.cpg should not be empty
+    "allow closing and then opening a project again" taggedAs NotInWindowsRunners in ConsoleFixture() {
+      (console, codeDir) =>
+        val projectName = "myproject"
+        console.importCode(codeDir.toString, projectName)
+        console.close(projectName).get.cpg shouldBe empty
+        console.open(projectName).get.cpg should not be empty
     }
 
-    "allow closing currently active project" in ConsoleFixture() { (console, codeDir) =>
+    "allow closing currently active project" taggedAs NotInWindowsRunners in ConsoleFixture() { (console, codeDir) =>
       val projectName = "myproject"
       console.importCode(codeDir.toString, projectName)
       val project = console.close
@@ -246,20 +334,21 @@ class ConsoleTests extends AnyWordSpec with Matchers {
       project.get.cpg shouldBe empty
     }
 
-    "should keep project active on close and allow setting other as active" in ConsoleFixture() { (console, codeDir) =>
-      console.importCode(codeDir.toString, "foo")
-      console.importCode(codeDir.toString, "bar")
-      console.close
-      a[RuntimeException] should be thrownBy console.cpg
-      console.open("foo")
-      Set("main", "bar").subsetOf(console.cpg.method.name.toSet) shouldBe true
+    "keep project active on close and allow setting other as active" taggedAs NotInWindowsRunners in ConsoleFixture() {
+      (console, codeDir) =>
+        console.importCode(codeDir.toString, "foo")
+        console.importCode(codeDir.toString, "bar")
+        console.close
+        a[RuntimeException] should be thrownBy console.cpg
+        console.open("foo")
+        Set("main", "bar").subsetOf(console.cpg.method.name.toSet) shouldBe true
     }
   }
 
   "delete" should {
 
-    "remove a project from disk" in ConsoleFixture() { (console, codeDir) =>
-      val cpg = console.importCode(codeDir.toString, "foo")
+    "remove a project from disk" taggedAs NotInWindowsRunners in ConsoleFixture() { (console, codeDir) =>
+      val cpg        = console.importCode(codeDir.toString, "foo")
       val projectDir = console.workspace.projectByCpg(cpg).get.path.toFile
       console.delete("foo")
       projectDir.exists shouldBe false
@@ -276,110 +365,70 @@ class ConsoleTests extends AnyWordSpec with Matchers {
 
     "prohibit adding semanticcpg again" in ConsoleFixture() { (console, codeDir) =>
       console.importCode(codeDir.toString)
-      console.project.appliedOverlays shouldBe List(Base.overlayName,
-                                                    ControlFlow.overlayName,
-                                                    TypeRelations.overlayName,
-                                                    CallGraph.overlayName)
+      console.project.appliedOverlays shouldBe List(
+        Base.overlayName,
+        ControlFlow.overlayName,
+        TypeRelations.overlayName,
+        CallGraph.overlayName
+      )
       val numOverlayFilesBefore = console.project.path.resolve("overlays").toFile.list().length
       numOverlayFilesBefore shouldBe 4
-      console._runAnalyzer(new Base, new ControlFlow, new TypeRelations, new CallGraph)
-      console.project.appliedOverlays shouldBe List(Base.overlayName,
-                                                    ControlFlow.overlayName,
-                                                    TypeRelations.overlayName,
-                                                    CallGraph.overlayName)
+      console._runAnalyzer(defaultOverlayCreators()*)
+      console.project.appliedOverlays shouldBe List(
+        Base.overlayName,
+        ControlFlow.overlayName,
+        TypeRelations.overlayName,
+        CallGraph.overlayName
+      )
       console.project.path.resolve("overlays").toFile.list().length shouldBe numOverlayFilesBefore
     }
 
     "store directory of zip files for each overlay in project" in ConsoleFixture() { (console, codeDir) =>
       console.importCode(codeDir.toString)
       val overlayParentDir = console.project.path.resolve("overlays")
-      overlayParentDir.toFile.list.toSet shouldBe Set(Base.overlayName,
-                                                      ControlFlow.overlayName,
-                                                      TypeRelations.overlayName,
-                                                      CallGraph.overlayName)
+      overlayParentDir.toFile.list.toSet shouldBe Set(
+        Base.overlayName,
+        ControlFlow.overlayName,
+        TypeRelations.overlayName,
+        CallGraph.overlayName
+      )
 
       val overlayDirs = overlayParentDir.toFile.listFiles()
       overlayDirs.foreach { dir =>
-        File(dir.getPath).isDirectory shouldBe true
-        File(dir.getPath).list.toList.foreach { file =>
-          Try { file.name.split("_").head.toInt }.isSuccess shouldBe true
+        Files.isDirectory(Paths.get(dir.getPath)) shouldBe true
+        Paths.get(dir.getPath).listFiles().foreach { file =>
+          Try { file.fileName.split("_").head.toInt }.isSuccess shouldBe true
           isZipFile(file) shouldBe true
         }
       }
     }
   }
 
-  private def isZipFile(file: File): Boolean = {
-    val bytes = file.bytes
-    Try {
-      bytes.next() == 'P' && bytes.next() == 'K'
-    }.getOrElse(false)
+  private def isZipFile(file: Path): Boolean = {
+    Using.Manager { use =>
+      val fis = use(Files.newInputStream(file))
+      val bis = use(new BufferedInputStream(fis))
+
+      Iterator.continually(bis.read()).takeWhile(_ != StreamTokenizer.TT_EOF).map(_.toByte)
+    } match {
+      case Success(bytes) =>
+        Try {
+          bytes.next() == 'P' && bytes.next() == 'K'
+        }.getOrElse(false)
+      case Failure(_) =>
+        false
+    }
   }
 
   class MockLayerCreator extends LayerCreator {
     override val overlayName: String = "fooname"
     override val description: String = "foodescr"
 
-    override def create(context: LayerCreatorContext, storeUndoInfo: Boolean): Unit = {}
-  }
-
-  "undo" should {
-    "remove layer from meta information" in ConsoleFixture() { (console, codeDir) =>
-      console.importCode(codeDir.toString)
-      console._runAnalyzer(new MockLayerCreator)
-      console.project.appliedOverlays shouldBe List(Base.overlayName,
-                                                    ControlFlow.overlayName,
-                                                    TypeRelations.overlayName,
-                                                    CallGraph.overlayName,
-                                                    "fooname")
-      console.undo
-      console.project.appliedOverlays shouldBe List(Base.overlayName,
-                                                    ControlFlow.overlayName,
-                                                    TypeRelations.overlayName,
-                                                    CallGraph.overlayName)
-      console.undo
-      console.undo
-      console.undo
-      console.undo
-      console.project.appliedOverlays shouldBe List()
-    }
-
-    "remove overlay file from project" in ConsoleFixture() { (console, codeDir) =>
-      console.importCode(codeDir.toString)
-      val overlayDir = console.project.path.resolve("overlays")
-      val overlayFilesBefore = overlayDir.toFile.list.toSet
-      overlayFilesBefore shouldBe Set(Base.overlayName,
-                                      ControlFlow.overlayName,
-                                      TypeRelations.overlayName,
-                                      CallGraph.overlayName)
-      console.undo
-      console.undo
-      console.undo
-      console.undo
-      val overlayFilesAfter = overlayDir.toFile.list.toSet
-      overlayFilesAfter shouldBe Set()
-    }
-
-    "actually remove some nodes" in ConsoleFixture() { (console, codeDir) =>
-      console.importCode(codeDir.toString)
-      console.cpg.parameter.asOutput.l.size should be > 0
-      console.project.appliedOverlays shouldBe List(Base.overlayName,
-                                                    ControlFlow.overlayName,
-                                                    TypeRelations.overlayName,
-                                                    CallGraph.overlayName)
-      console.undo
-      console.undo
-      console.undo
-      console.undo
-      console.project.appliedOverlays shouldBe List()
-      console.cpg.parameter.asOutput.l.size shouldBe 0
-      console._runAnalyzer(new Base)
-      console.cpg.parameter.asOutput.l.size should be > 0
-    }
+    override def create(context: LayerCreatorContext): Unit = {}
   }
 
   "save" should {
-    "close and reopen projects" in ConsoleFixture() { (console, codeDir) =>
+    "close and reopen projects" taggedAs NotInWindowsRunners in ConsoleFixture() { (console, codeDir) =>
       console.importCode(codeDir.toString, "project1")
       console.importCode(codeDir.toString, "project2")
       console.workspace.project("project1").exists(_.cpg.isDefined) shouldBe true
@@ -389,12 +438,12 @@ class ConsoleTests extends AnyWordSpec with Matchers {
       console.workspace.project("project2").exists(_.cpg.isDefined) shouldBe true
     }
 
-    "copy working copy to persistent copy" in ConsoleFixture() { (console, codeDir) =>
+    "copy working copy to persistent copy" taggedAs NotInWindowsRunners in ConsoleFixture() { (console, codeDir) =>
       console.importCode(codeDir.toString, "project1")
       val projectPath = console.project.path
       console.save
       val persistentCpgSize = projectPath.resolve("cpg.bin").toFile.length()
-      val workingCpgSize = projectPath.resolve("cpg.bin.tmp").toFile.length()
+      val workingCpgSize    = projectPath.resolve("cpg.bin.tmp").toFile.length()
       persistentCpgSize shouldBe workingCpgSize
     }
 
@@ -402,8 +451,17 @@ class ConsoleTests extends AnyWordSpec with Matchers {
 
   "cpg" should {
     "provide .help command" in ConsoleFixture() { (console, codeDir) =>
+      // part of Predefined.shared, which makes the below work in the repl without separate import
+      import io.joern.console.testing.availableWidthProvider
+      import io.shiftleft.semanticcpg.language.docSearchPackages
+
       console.importCode(codeDir.toString)
-      console.cpg.help.contains(".all") shouldBe true
+      val nodeStartersHelp = console.cpg.help
+      nodeStartersHelp should include(".all")
+      nodeStartersHelp should include(".controlStructure")
+
+      val methodStepsHelp = console.cpg.method.help
+      methodStepsHelp should include(".namespace")
     }
   }
 
@@ -413,37 +471,38 @@ class ConsoleTests extends AnyWordSpec with Matchers {
       Run.runCustomQuery(console, console.cpg.method.newTagNode("mytag"))
       console.cpg.tag.name("mytag").method.name.toSet should contain("main")
       console.cpg.metaData.map(_.overlays).head.last shouldBe "custom"
-      console.undo
-      console.cpg.metaData.map(_.overlays).head.last shouldBe "callgraph"
     }
   }
 
   "switchWorkspace" should {
 
     "create workspace if directory does not exist" in ConsoleFixture() { (console, _) =>
-      val otherWorkspaceDir = "/tmp" / "workspace-doesNotExist"
+      val otherWorkspaceDir = Paths.get(Properties.tmpDir) / "workspace-doesNotExist"
       try {
-        otherWorkspaceDir.exists shouldBe false
-        console.switchWorkspace(otherWorkspaceDir.path.toString)
-        otherWorkspaceDir.exists shouldBe true
+        Files.exists(otherWorkspaceDir) shouldBe false
+        console.switchWorkspace(otherWorkspaceDir.toString)
+        Files.exists(otherWorkspaceDir) shouldBe true
       } finally {
-        otherWorkspaceDir.delete()
-        otherWorkspaceDir.exists shouldBe false
+//        otherWorkspaceDir.delete()
+//        otherWorkspaceDir.exists shouldBe false
+        FileUtil.delete(otherWorkspaceDir)
+        Files.exists(otherWorkspaceDir) shouldBe false
       }
     }
 
-    "allow changing workspaces" in ConsoleFixture() { (console, codeDir) =>
-      val firstWorkspace = File(console.workspace.getPath)
-      File.usingTemporaryDirectory("console") { otherWorkspaceDir =>
+    "allow changing workspaces" taggedAs NotInWindowsRunners in ConsoleFixture() { (console, codeDir) =>
+      val firstWorkspace = Paths.get(console.workspace.getPath)
+
+      FileUtil.usingTemporaryDirectory("console") { otherWorkspaceDir =>
         console.importCode(codeDir.toString, "projectInFirstWorkspace")
         console.workspace.numberOfProjects shouldBe 1
-        console.switchWorkspace(otherWorkspaceDir.path.toString)
+        console.switchWorkspace(otherWorkspaceDir.toString)
         console.workspace.numberOfProjects shouldBe 0
 
         console.importCode(codeDir.toString, "projectInSecondWorkspace")
         console.workspace.numberOfProjects shouldBe 1
         console.project.name shouldBe "projectInSecondWorkspace"
-        console.switchWorkspace(firstWorkspace.path.toString)
+        console.switchWorkspace(firstWorkspace.toString)
         console.workspace.numberOfProjects shouldBe 1
         console.open("projectInFirstWorkspace")
         console.project.name shouldBe "projectInFirstWorkspace"

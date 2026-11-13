@@ -1,16 +1,19 @@
 package io.joern.c2cpg.passes
 
-import better.files.File
-import io.joern.c2cpg.C2Cpg.Config
+import io.joern.c2cpg.Config
+import io.shiftleft.semanticcpg.utils.FileUtil.*
+import io.shiftleft.semanticcpg.utils.FileUtil
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
+
+import java.nio.file.Files
 
 class PreprocessorPassTests extends AnyWordSpec with Matchers {
 
   "PreprocessorPass" should {
 
     "find all ifdefs and ifs" in {
-      File.usingTemporaryDirectory("preprocessorPassTests") { dir =>
+      FileUtil.usingTemporaryDirectory("preprocessorPassTests") { dir =>
         val code =
           """
             |#ifdef SYMBOL
@@ -27,16 +30,16 @@ class PreprocessorPassTests extends AnyWordSpec with Matchers {
             |""".stripMargin
 
         val filename = "test.c"
-        val file = dir / filename
-        file.write(code)
-
-        val stmts = new PreprocessorPass(Config(inputPaths = Set(dir.path.toString))).run().toList
+        val file     = dir / filename
+        Files.writeString(file, code)
+        val config = Config().withInputPath(dir.toString)
+        val stmts  = new PreprocessorPass(config).run().toList
         stmts shouldBe List("SYMBOL", "FOO=true")
       }
     }
 
     "find all ifdefs and ifs with predefined symbols" in {
-      File.usingTemporaryDirectory("preprocessorPassTests") { dir =>
+      FileUtil.usingTemporaryDirectory("preprocessorPassTests") { dir =>
         val code =
           """
             |#ifdef SYMBOL
@@ -53,10 +56,10 @@ class PreprocessorPassTests extends AnyWordSpec with Matchers {
             |""".stripMargin
 
         val filename = "test.c"
-        val file = dir / filename
-        file.write(code)
-        val config = Config(inputPaths = Set(dir.path.toString), defines = Set("SYMBOL"))
-        val stmts = new PreprocessorPass(config).run().toList
+        val file     = dir / filename
+        Files.writeString(file, code)
+        val config = Config(defines = Set("SYMBOL")).withInputPath(dir.toString)
+        val stmts  = new PreprocessorPass(config).run().toList
         stmts shouldBe List("SYMBOL=true", "FOO=true")
       }
     }

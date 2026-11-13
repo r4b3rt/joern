@@ -1,27 +1,18 @@
 package io.joern.ghidra2cpg.passes
 
-import io.shiftleft.codepropertygraph.Cpg
+import io.shiftleft.codepropertygraph.generated.Cpg
 import io.shiftleft.codepropertygraph.generated.EdgeTypes
 import io.shiftleft.codepropertygraph.generated.nodes.{Call, Method}
-import io.shiftleft.passes.{DiffGraph, IntervalKeyPool, ParallelCpgPass}
-import io.shiftleft.semanticcpg.language._
+import io.shiftleft.passes.ForkJoinParallelCpgPass
+import io.shiftleft.semanticcpg.language.*
 
 import scala.util.Try
 
-class JumpPass(cpg: Cpg, keyPool: IntervalKeyPool)
-    extends ParallelCpgPass[Method](
-      cpg,
-      keyPools = Some(keyPool.split(1))
-    ) {
+class JumpPass(cpg: Cpg) extends ForkJoinParallelCpgPass[Method](cpg) {
 
-  override def partIterator: Iterator[Method] = cpg.method.l.iterator
-
-  private def parseAddress(address: String): Option[Int] = {
-    Try(Integer.parseInt(address, 16)).toOption
-  }
-
-  override def runOnPart(method: Method): Iterator[DiffGraph] = {
-    implicit val diffGraph: DiffGraph.Builder = DiffGraph.newBuilder
+  override def generateParts(): Array[Method] =
+    cpg.method.toArray
+  override def runOnPart(diffGraph: DiffGraphBuilder, method: Method): Unit = {
     method.ast
       .filter(_.isInstanceOf[Call])
       .map(_.asInstanceOf[Call])
@@ -37,9 +28,12 @@ class JumpPass(cpg: Cpg, keyPool: IntervalKeyPool)
           /*
             TODO:
               - Ask ghidra to resolve addresses of JMPs
-         */
+           */
         }
       }
-    Iterator(diffGraph.build())
+  }
+
+  private def parseAddress(address: String): Option[Int] = {
+    Try(Integer.parseInt(address.replaceFirst("0x", ""), 16)).toOption
   }
 }

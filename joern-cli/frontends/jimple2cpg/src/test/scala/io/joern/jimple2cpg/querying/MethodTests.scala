@@ -1,40 +1,42 @@
 package io.joern.jimple2cpg.querying
 
-import io.joern.jimple2cpg.testfixtures.JimpleCodeToCpgFixture
-import io.shiftleft.semanticcpg.language._
+import io.joern.jimple2cpg.testfixtures.JimpleCode2CpgFixture
+import io.shiftleft.codepropertygraph.generated.Cpg
+import io.shiftleft.semanticcpg.language.*
 
 import java.io.File
 
-class MethodTests extends JimpleCodeToCpgFixture {
+class MethodTests extends JimpleCode2CpgFixture {
 
-  override val code: String =
-    """ class Foo {
+  val cpg: Cpg = code(""" class Foo {
       |   int foo(int param1, int param2) {
       |     return 1;
       |   }
       | }
-      |""".stripMargin
+      |""".stripMargin).cpg
 
   "should contain exactly one non-stub method node with correct fields" in {
-    val List(x) = cpg.method.nameNot("<init>").isExternal(false).l
+    val List(x) = cpg.method.nameNot(io.joern.x2cpg.Defines.ConstructorMethodName).isExternal(false).l
     x.name shouldBe "foo"
     x.fullName shouldBe "Foo.foo:int(int,int)"
-    x.code shouldBe "int foo(int param1, int param2)"
+    x.code.trim.startsWith("int foo(int, int)") shouldBe true
     x.signature shouldBe "int(int,int)"
     x.isExternal shouldBe false
-    x.order shouldBe 1
-    x.filename.startsWith(File.separator) shouldBe true
+    x.filename should (
+      startWith(File.separator) or // Unix
+        startWith regex "[A-Z]:"   // Windows
+    )
     x.filename.endsWith(".class") shouldBe true
     x.lineNumber shouldBe Some(2)
-    x.columnNumber shouldBe Some(-1)
+    x.columnNumber shouldBe None
   }
 
-//  "should return correct number of lines" in {
-//    cpg.method.name("foo").numberOfLines.l shouldBe List(3)
-//  }
+  "should return correct number of lines" in {
+    cpg.method.name("foo").numberOfLines.l shouldBe List(8)
+  }
 
   "should allow traversing to parameters" in {
-    cpg.method.name("foo").parameter.name.toSet shouldBe Set("param1", "param2")
+    cpg.method.name("foo").parameter.name.toSetMutable shouldBe Set("this", "param1", "param2")
   }
 
   "should allow traversing to methodReturn" in {

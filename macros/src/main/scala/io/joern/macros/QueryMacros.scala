@@ -1,28 +1,22 @@
 package io.joern.macros
 
-import io.shiftleft.codepropertygraph.Cpg
-import io.shiftleft.codepropertygraph.generated.nodes.StoredNode
 import io.joern.console.TraversalWithStrRep
-import overflowdb.traversal.Traversal
+import io.shiftleft.codepropertygraph.generated.Cpg
+import io.shiftleft.codepropertygraph.generated.nodes.StoredNode
 
-import scala.language.experimental.macros
-import scala.reflect.macros.whitebox
+import scala.quoted.{Expr, Quotes}
 
 object QueryMacros {
 
-  def withStrRep(traversal: Cpg => Traversal[_ <: StoredNode]): TraversalWithStrRep = macro withStrRepImpl
+  inline def withStrRep(inline traversal: Cpg => Iterator[? <: StoredNode]): TraversalWithStrRep =
+    ${ withStrRepImpl('{ traversal }) }
 
-  def withStrRepImpl(c: whitebox.Context)(traversal: c.Tree): c.Expr[TraversalWithStrRep] = {
-    import c.universe._
-    val fileContent = new String(traversal.pos.source.content)
-    val start = traversal.pos.start
-    val end = traversal.pos.end
-    val traversalAsString: String = fileContent.slice(start, end)
-
-    c.Expr(
-      q"""
-        TraversalWithStrRep($traversal, $traversalAsString)
-       """
-    )
+  private def withStrRepImpl(
+    travExpr: Expr[Cpg => Iterator[? <: StoredNode]]
+  )(using quotes: Quotes): Expr[TraversalWithStrRep] = {
+    import quotes.reflect._
+    val pos  = travExpr.asTerm.pos
+    val code = Position(pos.sourceFile, pos.start, pos.end).sourceCode.getOrElse("N/A")
+    '{ TraversalWithStrRep(${ travExpr }, ${ Expr(code) }) }
   }
 }

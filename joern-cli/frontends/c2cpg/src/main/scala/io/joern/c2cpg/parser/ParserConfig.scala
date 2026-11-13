@@ -1,29 +1,60 @@
 package io.joern.c2cpg.parser
 
-import io.joern.c2cpg.C2Cpg.Config
+import io.joern.c2cpg.Config
+import io.joern.c2cpg.parser.JSONCompilationDatabaseParser.CompilationDatabase
 import io.joern.c2cpg.utils.IncludeAutoDiscovery
 
 import java.nio.file.{Path, Paths}
+import scala.collection.mutable
 
 object ParserConfig {
 
-  def empty: ParserConfig = ParserConfig(Set.empty, Map.empty, logProblems = false, logPreprocessor = false)
+  def empty: ParserConfig =
+    ParserConfig(
+      mutable.LinkedHashSet.empty,
+      mutable.LinkedHashSet.empty,
+      mutable.LinkedHashSet.empty,
+      Map.empty,
+      Map.empty,
+      Map.empty
+    )
 
-  def fromConfig(config: Config): ParserConfig = ParserConfig(
-    config.includePaths.map(Paths.get(_).toAbsolutePath) ++ IncludeAutoDiscovery.discoverIncludePaths(config),
-    config.defines.map {
-      case define if define.contains("=") =>
-        val s = define.split("=")
-        s.head -> s(1)
-      case define => define -> "true"
-    }.toMap ++ DefaultDefines.DEFAULT_CALL_CONVENTIONS,
-    config.logProblems,
-    config.logPreprocessor
-  )
+  def fromConfig(config: Config, compilationDatabase: Option[CompilationDatabase]): ParserConfig = {
+    val commands                   = compilationDatabase.map(_.commands).getOrElse(Set.empty)
+    val compilationDatabaseDefines = commands.map { cmd =>
+      cmd.compiledFile() -> cmd.defines().toMap
+    }.toMap
+    val includes = commands.map { cmd =>
+      cmd.compiledFile() -> cmd.includes()
+    }.toMap
+    val defaultDefines = DefaultDefines.MSVC_INTEGER_TYPES ++ DefaultDefines.ALIGNMENT_SPECIFIER
+    // User defines take precedence over these defaults but not over the calling conventions (as before).
+    val definedSymbols = defaultDefines ++ config.defines.map { define =>
+      if (define.contains("=")) {
+        // Only the first `=` separates name from value: a value may itself contain `=`, or be empty.
+        val split = define.split("=", 2)
+        split.head -> split(1)
+      } else {
+        define -> ""
+      }
+    }.toMap ++ DefaultDefines.DEFAULT_CALL_CONVENTIONS
+    ParserConfig(
+      mutable.LinkedHashSet.from(config.includePaths.map(Paths.get(_).toAbsolutePath)),
+      IncludeAutoDiscovery.discoverIncludePathsC(config),
+      IncludeAutoDiscovery.discoverIncludePathsCPP(config),
+      definedSymbols,
+      compilationDatabaseDefines,
+      includes
+    )
+  }
 
 }
 
-case class ParserConfig(includePaths: Set[Path],
-                        definedSymbols: Map[String, String],
-                        logProblems: Boolean,
-                        logPreprocessor: Boolean)
+case class ParserConfig(
+  userIncludePaths: mutable.LinkedHashSet[Path],
+  systemIncludePathsC: mutable.LinkedHashSet[Path],
+  systemIncludePathsCPP: mutable.LinkedHashSet[Path],
+  definedSymbols: Map[String, String],
+  definedSymbolsPerFile: Map[String, Map[String, String]],
+  includesPerFile: Map[String, mutable.LinkedHashSet[String]]
+)

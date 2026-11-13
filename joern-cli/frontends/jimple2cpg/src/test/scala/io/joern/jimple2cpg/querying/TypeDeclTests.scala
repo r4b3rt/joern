@@ -1,33 +1,37 @@
 package io.joern.jimple2cpg.querying
 
-import io.joern.jimple2cpg.testfixtures.JimpleCodeToCpgFixture
-import io.shiftleft.semanticcpg.language._
+import io.joern.jimple2cpg.testfixtures.JimpleCode2CpgFixture
+import io.shiftleft.codepropertygraph.generated.Cpg
+import io.shiftleft.codepropertygraph.generated.ModifierTypes
+import io.shiftleft.semanticcpg.language.*
 import io.shiftleft.semanticcpg.language.types.structure.FileTraversal
 
-import java.io.{File => JFile}
+import java.io.File
 
-class TypeDeclTests extends JimpleCodeToCpgFixture {
+class TypeDeclTests extends JimpleCode2CpgFixture {
 
-  override val code: String =
-    """
+  lazy val cpg: Cpg = code("""
       | package Foo;
-      | class Bar extends Woo {
+      | abstract class Bar extends Woo {
       |   int x;
       |   int method () { return 1; }
       | };
       | class Woo {}
-      | """.stripMargin
+      | """.stripMargin).cpg
 
   "should contain a type decl for `foo` with correct fields" in {
     val List(x) = cpg.typeDecl.name("Bar").l
     x.name shouldBe "Bar"
-    x.code shouldBe "Bar"
+    x.code shouldBe "abstract class Bar extends Foo.Woo"
     x.fullName shouldBe "Foo.Bar"
     x.isExternal shouldBe false
     x.inheritsFromTypeFullName shouldBe List("Foo.Woo")
     x.aliasTypeFullName shouldBe None
     x.order shouldBe 1
-    x.filename.startsWith(JFile.separator) shouldBe true
+    x.filename should (
+      startWith(File.separator) or // Unix
+        startWith regex "[A-Z]:"   // Windows
+    )
     x.filename.endsWith(".class") shouldBe true
   }
 
@@ -40,6 +44,12 @@ class TypeDeclTests extends JimpleCodeToCpgFixture {
     x.aliasTypeFullName shouldBe None
     x.order shouldBe -1
     x.filename shouldBe FileTraversal.UNKNOWN
+  }
+
+  "should contain the correct modifier(s)" in {
+    val List(x) = cpg.typeDecl.name("Bar").l
+    val List(m) = x.modifier.l
+    m.modifierType shouldBe ModifierTypes.ABSTRACT
   }
 
 }

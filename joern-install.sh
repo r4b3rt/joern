@@ -126,8 +126,8 @@ if [ -d "$JOERN_INSTALL_DIR/joern-cli" ]; then
     printf "Should I remove it? [y/N]"
     read -r ANSWER
     if [ $ANSWER = "y" ] || [ $ANSWER = "Y" ]; then
-      echo "rm -r $JOERN_INSTALL_DIR/joern-cli"
-      rm -r "$JOERN_INSTALL_DIR/joern-cli"
+      echo "rm -rf $JOERN_INSTALL_DIR/joern-cli"
+      rm -rf "$JOERN_INSTALL_DIR/joern-cli"
     else
         exit
     fi
@@ -137,8 +137,8 @@ if [ -d "$JOERN_INSTALL_DIR/joern-cli" ]; then
       exit
     else
       echo "Removing: $JOERN_INSTALL_DIR/joern-cli"
-      echo "rm -r $JOERN_INSTALL_DIR/joern-cli"
-      rm -r "$JOERN_INSTALL_DIR/joern-cli"
+      echo "rm -rf $JOERN_INSTALL_DIR/joern-cli"
+      rm -rf "$JOERN_INSTALL_DIR/joern-cli"
     fi
   fi
 fi
@@ -152,19 +152,42 @@ mkdir -p $JOERN_INSTALL_DIR
 # Download and extract the Joern CLI
 
 check_installed "curl"
+check_installed "unzip"
+
+detect_platform() {
+  OS=$(uname -s)
+  ARCH=$(uname -m)
+  case "$OS" in
+    Linux)
+      case "$ARCH" in
+        aarch64|arm64) echo "linux-arm64" ;;
+        *)             echo "linux-x86_64" ;;
+      esac ;;
+    Darwin)
+      case "$ARCH" in
+        arm64) echo "macos-arm64" ;;
+        *)     echo "macos-x86_64" ;;
+      esac ;;
+    *)
+      echo "linux-x86_64" ;;
+  esac
+}
+
+PLATFORM=$(detect_platform)
+JOERN_ZIP="joern-cli-${PLATFORM}.zip"
 
 if [ $NO_DOWNLOAD = true ]; then
     sbt createDistribution
     sbt clean
 else
   if [ "$JOERN_VERSION" = "" ]; then
-    curl -L "https://github.com/ShiftLeftSecurity/joern/releases/latest/download/joern-cli.zip" -o "$SCRIPT_ABS_DIR/joern-cli.zip"
+    curl -L "https://github.com/joernio/joern/releases/latest/download/${JOERN_ZIP}" -o "$SCRIPT_ABS_DIR/${JOERN_ZIP}"
   else
-    curl -L "https://github.com/ShiftLeftSecurity/joern/releases/download/$JOERN_VERSION/joern-cli.zip" -o "$SCRIPT_ABS_DIR/joern-cli.zip"
+    curl -L "https://github.com/joernio/joern/releases/download/$JOERN_VERSION/${JOERN_ZIP}" -o "$SCRIPT_ABS_DIR/${JOERN_ZIP}"
   fi
 fi
 
-unzip -qo -d "$JOERN_INSTALL_DIR" "$SCRIPT_ABS_DIR"/joern-cli.zip
+unzip -qo -d "$JOERN_INSTALL_DIR" "$SCRIPT_ABS_DIR"/${JOERN_ZIP}
 
 if [ $INTERACTIVE = false ] && [ "$(whoami)" != "root" ]; then
   echo "==============================================================="
@@ -178,13 +201,18 @@ else
 	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/joern "$JOERN_LINK_DIR" || true
 	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/joern-parse "$JOERN_LINK_DIR" || true
 	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/c2cpg.sh "$JOERN_LINK_DIR" || true
-	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/fuzzyc2cpg.sh "$JOERN_LINK_DIR" || true
 	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/ghidra2cpg "$JOERN_LINK_DIR" || true
-	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/js2cpg.sh "$JOERN_LINK_DIR" || true
+	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/jssrc2cpg.sh "$JOERN_LINK_DIR" || true
+	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/javasrc2cpg "$JOERN_LINK_DIR" || true
+	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/jimple2cpg "$JOERN_LINK_DIR" || true
+	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/kotlin2cpg "$JOERN_LINK_DIR" || true
+	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/php2cpg "$JOERN_LINK_DIR" || true
+	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/rubysrc2cpg "$JOERN_LINK_DIR" || true
+	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/pysrc2cpg "$JOERN_LINK_DIR" || true
 	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/joern-export "$JOERN_LINK_DIR" || true
 	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/joern-flow "$JOERN_LINK_DIR" || true
 	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/joern-scan "$JOERN_LINK_DIR" || true
-	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/joern-stats "$JOERN_LINK_DIR" || true
+	    sudo ln -sf "$JOERN_INSTALL_DIR"/joern-cli/joern-slice "$JOERN_LINK_DIR" || true
     fi
 fi
 
@@ -194,7 +222,11 @@ if [ $INSTALL_DEFAULT_PLUGINS = true ]; then
   echo "Installing default plugins"
   CURDIR=$(pwd)
   cd $JOERN_INSTALL_DIR/joern-cli
-  ./joern-scan --updatedb
+  if [ "$JOERN_VERSION" = "" ]; then
+    ./joern-scan --updatedb
+  else
+    ./joern-scan --updatedb --dbversion "${JOERN_VERSION#v}"
+  fi
   cd "$CURDIR"
 fi
 

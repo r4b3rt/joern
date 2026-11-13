@@ -2,15 +2,10 @@ package io.joern.scanners.c
 
 import io.joern.suites.CQueryTestSuite
 import io.shiftleft.codepropertygraph.generated.nodes
-import io.joern.console.scan._
-import io.joern.dataflowengineoss.queryengine.EngineContext
-import io.joern.dataflowengineoss.semanticsloader.Semantics
-import io.shiftleft.semanticcpg.language._
-import overflowdb.traversal.iterableToTraversal
-import io.joern.dataflowengineoss.semanticsloader.{Parser, Semantics}
+import io.joern.console.scan.*
+import io.shiftleft.semanticcpg.language.*
 
-class UseAfterFreeReturnTests extends CQueryTestSuite {
-  override def queryBundle = UseAfterFree
+class UseAfterFreeReturnTests extends CQueryTestSuite(UseAfterFree) {
 
   "should flag `bad` function only" in {
     val x = queryBundle.freeReturnedValue()

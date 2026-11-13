@@ -1,11 +1,10 @@
-package io.joern.scanners.java;
+package io.joern.scanners.java
 
-import io.joern.scanners._
-import io.shiftleft.semanticcpg.language._
-import io.joern.console._
-import io.joern.console._
-import io.joern.macros.QueryMacros._
-import io.joern.dataflowengineoss.language._
+import io.joern.scanners.*
+import io.shiftleft.semanticcpg.language.*
+import io.joern.console.*
+import io.joern.macros.QueryMacros.*
+import io.joern.dataflowengineoss.language.*
 import io.joern.dataflowengineoss.queryengine.EngineContext
 
 object CrossSiteScripting extends QueryBundle {
@@ -31,15 +30,11 @@ object CrossSiteScripting extends QueryBundle {
           )
 
         def responseWriter =
-          cpg.call.methodFullNameExact(
-            "javax.servlet.http.HttpServletResponse.getWriter:java.io.PrintWriter()"
-          )
+          cpg.call.methodFullNameExact("javax.servlet.http.HttpServletResponse.getWriter:java.io.PrintWriter()")
 
         def sinks =
           cpg.call
-            .methodFullNameExact(
-              "java.io.PrintWriter.println:void(java.lang.String)"
-            )
+            .methodFullNameExact("java.io.PrintWriter.println:void(java.lang.String)")
             .where(_.argument(0).reachableBy(responseWriter))
 
         sinks.where(_.argument(1).reachableBy(source))

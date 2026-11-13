@@ -2,13 +2,10 @@ package io.joern.scanners.c
 
 import io.joern.suites.CQueryTestSuite
 import io.shiftleft.codepropertygraph.generated.nodes
-import io.joern.console.scan._
-import io.shiftleft.semanticcpg.language._
-import overflowdb.traversal.iterableToTraversal
+import io.joern.console.scan.*
+import io.shiftleft.semanticcpg.language.*
 
-class UseAfterFreePostUsage extends CQueryTestSuite {
-
-  override def queryBundle = UseAfterFree
+class UseAfterFreePostUsage extends CQueryTestSuite(UseAfterFree) {
 
   "should flag functions `bad` and `false_positive` only" in {
     val x = queryBundle.freePostDominatesUsage()

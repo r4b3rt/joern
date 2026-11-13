@@ -1,17 +1,11 @@
 package io.joern.scanners.c
 
 import io.joern.suites.CQueryTestSuite
-import io.shiftleft.codepropertygraph.generated.nodes
-import io.joern.console.scan._
-import io.shiftleft.semanticcpg.language._
-import overflowdb.traversal.iterableToTraversal
+import io.joern.x2cpg.testfixtures.TestCpg
 
-class SocketApiTests extends CQueryTestSuite {
+class SocketApiTests extends CQueryTestSuite(SocketApi) {
 
-  override def queryBundle = SocketApi
-
-  override val code: String =
-    """
+  override val cpg: TestCpg = code("""
       |void return_not_checked(int sockfd, void *buf, size_t len, int flags) {
       |    send(sockfd, buf, len, flags);
       |}
@@ -29,12 +23,11 @@ class SocketApiTests extends CQueryTestSuite {
       |        // Do something
       |    }
       |}
-      |""".stripMargin
+      |""".stripMargin)
 
   "should flag function `return_not_checked` only" in {
-    val query = queryBundle.uncheckedSend()
+    val query   = queryBundle.uncheckedSend()
     val results = findMatchingCalls(query)
-
     results shouldBe Set("return_not_checked")
   }
 

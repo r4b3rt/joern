@@ -1,13 +1,13 @@
 package io.joern.dataflowengineoss.dotgenerator
 
+import io.joern.dataflowengineoss.DefaultSemantics
 import io.shiftleft.codepropertygraph.generated.nodes.Method
 import io.joern.dataflowengineoss.semanticsloader.Semantics
 import io.shiftleft.semanticcpg.dotgenerator.{AstGenerator, CdgGenerator, CfgGenerator, DotSerializer}
-import overflowdb.traversal.Traversal
 
 object DotCpg14Generator {
 
-  def toDotCpg14(traversal: Traversal[Method])(implicit semantics: Semantics): Traversal[String] =
+  def toDotCpg14(traversal: Iterator[Method])(implicit semantics: Semantics = DefaultSemantics()): Iterator[String] =
     traversal.map(dotGraphForMethod)
 
   private def dotGraphForMethod(method: Method)(implicit semantics: Semantics): String = {
@@ -15,7 +15,7 @@ object DotCpg14Generator {
     val cfg = new CfgGenerator().generate(method)
     val ddg = new DdgGenerator().generate(method)
     val cdg = new CdgGenerator().generate(method)
-    DotSerializer.dotGraph(method, ast ++ cfg ++ ddg ++ cdg, withEdgeTypes = true)
+    DotSerializer.dotGraph(Option(method), ast ++ cfg ++ ddg ++ cdg, withEdgeTypes = true)
   }
 
 }

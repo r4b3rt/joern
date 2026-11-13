@@ -1,12 +1,11 @@
 package io.joern.javasrc2cpg.querying
 
-import io.joern.javasrc2cpg.testfixtures.JavaSrcCodeToCpgFixture
-import io.shiftleft.semanticcpg.language._
+import io.joern.javasrc2cpg.testfixtures.JavaSrcCode2CpgFixture
+import io.shiftleft.semanticcpg.language.*
 
-class CfgTests extends JavaSrcCodeToCpgFixture {
+class CfgTests extends JavaSrcCode2CpgFixture {
 
-  override val code =
-    """
+  lazy val cpg = code("""
       |class Foo {
       | int foo(int x, int y) {
       |  if (y < 10)
@@ -18,10 +17,10 @@ class CfgTests extends JavaSrcCodeToCpgFixture {
       |  return 0;
       | }
       |}
-    """.stripMargin
+    """.stripMargin)
 
   "should find that sink is control dependent on condition" in {
-    val controllers = cpg.call("sink").controlledBy.isCall.toSet
+    val controllers = cpg.call("sink").controlledBy.isCall.toSetMutable
     controllers.map(_.code) should contain("y < 10")
     controllers.map(_.code) should contain("x < 10")
   }
@@ -35,11 +34,11 @@ class CfgTests extends JavaSrcCodeToCpgFixture {
   }
 
   "should find sink(x) is dominated by `x<10` and `y < 10`" in {
-    cpg.call("sink").dominatedBy.isCall.code.toSet shouldBe Set("x < 10", "y < 10")
+    cpg.call("sink").dominatedBy.isCall.code.toSetMutable shouldBe Set("x < 10", "y < 10")
   }
 
   "should find that println post dominates correct nodes" in {
-    cpg.call("println").postDominates.size shouldBe 11
+    cpg.call("println").postDominates.size shouldBe 10
   }
 
   "should find that method does not post dominate anything" in {

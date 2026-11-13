@@ -1,60 +1,76 @@
 package io.joern.jimple2cpg.testfixtures
 
-import io.joern.jimple2cpg.Jimple2Cpg
-import io.shiftleft.codepropertygraph.Cpg
-import io.shiftleft.semanticcpg.testfixtures.{CodeToCpgFixture, LanguageFrontend}
+import io.joern.dataflowengineoss.DefaultSemantics
+import io.joern.dataflowengineoss.semanticsloader.{FlowSemantic, Semantics}
+import io.joern.dataflowengineoss.testfixtures.{SemanticCpgTestFixture, SemanticTestCpg}
+import io.joern.jimple2cpg.{Config, Jimple2Cpg}
+import io.joern.x2cpg.X2Cpg
+import io.joern.x2cpg.testfixtures.{Code2CpgFixture, DefaultTestCpg, LanguageFrontend, TestCpg}
+import io.shiftleft.semanticcpg.utils.FileUtil.*
+import io.shiftleft.codepropertygraph.generated.Cpg
+import io.shiftleft.semanticcpg.validation.{PostFrontendValidator, ValidationLevel}
 
-import java.io.{File, PrintWriter}
-import java.nio.file.Files
+import java.io.File
+import java.nio.file.Path
 import java.util.Collections
 import javax.tools.{JavaCompiler, JavaFileObject, StandardLocation, ToolProvider}
-import scala.jdk.CollectionConverters
+import scala.jdk.CollectionConverters.IterableHasAsJava
 
-class JimpleFrontend extends LanguageFrontend {
+trait Jimple2CpgFrontend extends LanguageFrontend {
+  override type ConfigType = Config
 
   override val fileSuffix: String = ".java"
 
   override def execute(sourceCodeFile: File): Cpg = {
-    new Jimple2Cpg().createCpg(sourceCodeFile.getAbsolutePath)
+    val config = getConfig().getOrElse(Config())
+    val cpg    = new Jimple2Cpg().createCpg(config.withInputPath(sourceCodeFile.getAbsolutePath)).get
+    new PostFrontendValidator(cpg, ValidationLevel.V0).run()
+    cpg
   }
 }
 
-class JimpleCodeToCpgFixture extends CodeToCpgFixture(new JimpleFrontend) {
+class JimpleCode2CpgFixture(withOssDataflow: Boolean = false, semantics: Semantics = DefaultSemantics())
+    extends Code2CpgFixture(() => new JimpleTestCpg().withOssDataflow(withOssDataflow).withSemantics(semantics))
+    with SemanticCpgTestFixture(semantics) {}
 
-  override def writeCodeToFile(sourceCode: String): File = {
-    val tmpDir = Files.createTempDirectory("semanticcpgtest").toFile
-    tmpDir.deleteOnExit()
-    val codeFile = File.createTempFile("Test", frontend.fileSuffix, tmpDir)
-    codeFile.deleteOnExit()
-    new PrintWriter(codeFile) { write(sourceCode); close() }
-    compileJava(codeFile)
-    tmpDir
+class JimpleTestCpg extends DefaultTestCpg with Jimple2CpgFrontend with SemanticTestCpg {
+
+  override protected def applyPasses(): Unit = {
+    super.applyPasses()
+    applyOssDataFlow()
   }
 
-  /**
-    * Compiles the source code with debugging info.
+  override protected def codeDirPreProcessing(rootFile: Path, codeFiles: List[Path]): Unit = {
+    val sourceFiles = codeFiles.map(_.toFile).filter(_.getName.endsWith(".java"))
+    if (sourceFiles.nonEmpty) JimpleCodeToCpgFixture.compileJava(rootFile, sourceFiles)
+  }
+
+}
+
+object JimpleCodeToCpgFixture {
+
+  /** Compiles the source code with debugging info.
     */
-  def compileJava(sourceCodeFile: File): Unit = {
-    val javac = getJavaCompiler
+  def compileJava(root: Path, sourceCodeFiles: List[File]): Unit = {
+    val javac       = getJavaCompiler
     val fileManager = javac.getStandardFileManager(null, null, null)
-    javac
-      .getTask(
-        null,
-        fileManager,
-        null,
-        CollectionConverters.SeqHasAsJava(Seq("-g", "-d", sourceCodeFile.getParent)).asJava,
-        null,
-        fileManager.getJavaFileObjectsFromFiles(CollectionConverters.SeqHasAsJava(Seq(sourceCodeFile)).asJava)
-      )
-      .call()
-
-    fileManager
-      .list(StandardLocation.CLASS_OUTPUT, "", Collections.singleton(JavaFileObject.Kind.CLASS), false)
-      .forEach(x => new File(x.toUri).deleteOnExit())
+    try {
+      javac
+        .getTask(
+          null,
+          fileManager,
+          null,
+          Seq("-g", "-d", root.toString).asJava,
+          null,
+          fileManager.getJavaFileObjectsFromFiles(sourceCodeFiles.asJava)
+        )
+        .call()
+    } finally {
+      fileManager.close()
+    }
   }
 
-  /**
-    * Programmatically obtains the system Java compiler.
+  /** Programmatically obtains the system Java compiler.
     */
   def getJavaCompiler: JavaCompiler = {
     Option(ToolProvider.getSystemJavaCompiler) match {
@@ -62,5 +78,4 @@ class JimpleCodeToCpgFixture extends CodeToCpgFixture(new JimpleFrontend) {
       case None        => throw new RuntimeException("Unable to find a Java compiler on the system!")
     }
   }
-
 }

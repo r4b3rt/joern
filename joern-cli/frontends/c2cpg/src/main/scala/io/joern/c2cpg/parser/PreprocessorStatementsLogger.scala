@@ -1,12 +1,6 @@
 package io.joern.c2cpg.parser
 
-import org.eclipse.cdt.core.dom.ast.{
-  IASTPreprocessorFunctionStyleMacroDefinition,
-  IASTPreprocessorIfStatement,
-  IASTPreprocessorIfdefStatement,
-  IASTPreprocessorStatement,
-  IASTTranslationUnit
-}
+import org.eclipse.cdt.core.dom.ast.*
 import org.slf4j.LoggerFactory
 
 trait PreprocessorStatementsLogger {
@@ -14,6 +8,10 @@ trait PreprocessorStatementsLogger {
   this: CdtParser =>
 
   private val logger = LoggerFactory.getLogger(classOf[PreprocessorStatementsLogger])
+
+  protected def logPreprocessorStatements(translationUnit: IASTTranslationUnit): Unit = {
+    preprocessorStatements(translationUnit).foreach(logPreprocessorStatement)
+  }
 
   private def logPreprocessorStatement(node: IASTPreprocessorStatement): Unit = {
     val text = s"""Preprocessor statement '${node.getClass.getSimpleName}' found!
@@ -33,14 +31,11 @@ trait PreprocessorStatementsLogger {
            |  Defined: ${s.taken()}""".stripMargin
       case _ => ""
     }
-    logger.info(text + additionalInfo)
+    logger.info(s"$text$additionalInfo")
   }
 
-  protected def preprocessorStatements(translationUnit: IASTTranslationUnit): Iterable[IASTPreprocessorStatement] =
+  protected def preprocessorStatements(translationUnit: IASTTranslationUnit): Iterable[IASTPreprocessorStatement] = {
     translationUnit.getAllPreprocessorStatements
-
-  protected def logPreprocessorStatements(translationUnit: IASTTranslationUnit): Unit = {
-    preprocessorStatements(translationUnit).foreach(logPreprocessorStatement)
   }
 
 }

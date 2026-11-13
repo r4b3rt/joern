@@ -1,13 +1,12 @@
 package io.joern.console.cpgcreation
 
-import better.files.Dsl._
-import better.files.File
-import io.shiftleft.codepropertygraph.cpgloading.{CpgLoader, CpgLoaderConfig}
+import io.shiftleft.semanticcpg.utils.FileUtil.*
+import io.shiftleft.codepropertygraph.cpgloading.CpgLoader
 import io.shiftleft.codepropertygraph.generated.Languages
-import io.joern.console.ConsoleConfig
-import overflowdb.Config
+import io.joern.console.{ConsoleConfig, CpgConverter}
+import io.shiftleft.semanticcpg.utils.FileUtil
 
-import java.nio.file.Path
+import java.nio.file.{Files, Path, Paths, StandardCopyOption}
 import scala.util.Try
 
 object CpgGeneratorFactory {
@@ -18,80 +17,79 @@ object CpgGeneratorFactory {
     Languages.GHIDRA,
     Languages.JAVA,
     Languages.JAVASCRIPT,
+    Languages.JSSRC,
     Languages.PYTHON,
-    Languages.FUZZY_TEST_LANG,
+    Languages.PYTHONSRC,
     Languages.LLVM,
     Languages.PHP,
     Languages.KOTLIN,
     Languages.NEWC,
-    Languages.JAVASRC
+    Languages.JAVASRC,
+    Languages.SWIFTSRC,
+    Languages.RUST,
+    Languages.ABAP
   )
 }
 
 class CpgGeneratorFactory(config: ConsoleConfig) {
 
-  /**
-    * For a given input path, try to guess a suitable generator and return it
-    * */
+  /** For a given input path, try to guess a suitable generator and return it if it is available */
   def forCodeAt(inputPath: String): Option[CpgGenerator] =
     for {
-      language <- guessLanguage(inputPath)
-      cpgGenerator <- cpgGeneratorForLanguage(language, config.frontend, config.install.rootPath.path, args = Nil)
+      language     <- guessLanguage(inputPath)
+      cpgGenerator <- cpgGeneratorForLanguage(language, config.frontend, config.install.rootPath, args = Nil)
+      if cpgGenerator.isAvailable
     } yield {
       report(s"Using generator for language: $language: ${cpgGenerator.getClass.getSimpleName}")
       cpgGenerator
     }
 
-  /**
-    * For a language, return the generator
-    * */
+  /** For a language, return the generator if it is available */
   def forLanguage(language: String): Option[CpgGenerator] = {
-    Option(language)
-      .filter(languageIsKnown)
-      .flatMap { lang =>
-        cpgGeneratorForLanguage(lang, config.frontend, config.install.rootPath.path, args = Nil)
-      }
+    for {
+      lang <- Option(language)
+      if languageIsKnown(lang)
+      generator <- cpgGeneratorForLanguage(lang, config.frontend, config.install.rootPath, args = Nil)
+      if generator.isAvailable
+    } yield generator
   }
 
   def languageIsKnown(language: String): Boolean = CpgGeneratorFactory.KNOWN_LANGUAGES.contains(language)
 
-  def runGenerator(frontend: CpgGenerator,
-                   inputPath: String,
-                   outputPath: String,
-                   namespaces: List[String] = List()): Option[Path] = {
-    val outputFileOpt: Option[File] =
-      frontend.generate(inputPath, outputPath, namespaces).map(File(_))
+  def runGenerator(generator: CpgGenerator, inputPath: String, outputPath: String): Try[Path] = {
+    val outputFileOpt: Try[Path] =
+      generator.generate(inputPath, outputPath).map(Paths.get(_))
     outputFileOpt.map { outFile =>
-      val parentPath = outFile.parent.path.toAbsolutePath
-      if (isZipFile(outFile)) {
+      val parentPath = outFile.getParent.toAbsolutePath
+      if (CpgLoader.isProtoFormat(outFile)) {
         report("Creating database from bin.zip")
-        val srcFilename = outFile.path.toAbsolutePath.toString
+        val srcFilename = outFile.absolutePathAsString
         val dstFilename = parentPath.resolve("cpg.bin").toAbsolutePath.toString
         // MemoryHelper.hintForInsufficientMemory(srcFilename).map(report)
-        convertProtoCpgToOverflowDb(srcFilename, dstFilename)
+        convertProtoCpgToFlatgraph(srcFilename, dstFilename)
       } else {
         report("moving cpg.bin.zip to cpg.bin because it is already a database file")
         val srcPath = parentPath.resolve("cpg.bin.zip")
         if (srcPath.toFile.exists()) {
-          mv(srcPath, parentPath.resolve("cpg.bin"))
+          val cpgBinPath = parentPath.resolve("cpg.bin")
+          if (Files.isDirectory(cpgBinPath)) {
+            Files.move(srcPath, cpgBinPath)
+          } else {
+            Files.move(srcPath, cpgBinPath, StandardCopyOption.REPLACE_EXISTING)
+          }
         }
       }
       parentPath
     }
   }
 
-  def convertProtoCpgToOverflowDb(srcFilename: String, dstFilename: String): Unit = {
-    val odbConfig = Config.withDefaults.withStorageLocation(dstFilename)
-    val config = CpgLoaderConfig.withDefaults.doNotCreateIndexesOnLoad.withOverflowConfig(odbConfig)
-    CpgLoader.load(srcFilename, config).close
-    File(srcFilename).delete()
-  }
+  @deprecated("method got renamed to `convertProtoCpgToFlatgraph, please use that instead", "joern v3")
+  def convertProtoCpgToOverflowDb(srcFilename: String, dstFilename: String): Unit =
+    convertProtoCpgToFlatgraph(srcFilename, dstFilename)
 
-  def isZipFile(file: File): Boolean = {
-    val bytes = file.bytes
-    Try {
-      bytes.next() == 'P' && bytes.next() == 'K'
-    }.getOrElse(false)
+  def convertProtoCpgToFlatgraph(srcFilename: String, dstFilename: String): Unit = {
+    CpgConverter.convertProtoCpgToFlatgraph(srcFilename, dstFilename)
+    FileUtil.delete(Paths.get(srcFilename))
   }
 
   private def report(str: String): Unit = System.err.println(str)

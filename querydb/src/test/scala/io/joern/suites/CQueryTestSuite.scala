@@ -1,39 +1,34 @@
 package io.joern.suites
 
 import io.joern.util.QueryUtil
-import io.joern.util.QueryUtil.allQueries
 import io.shiftleft.codepropertygraph.generated.nodes
-import io.joern.console.scan._
-import io.joern.console.{QueryBundle, QueryDatabase}
+import io.joern.console.scan.*
+import io.joern.console.QueryBundle
 import io.joern.console.Query
 import io.joern.c2cpg.testfixtures.DataFlowCodeToCpgSuite
-import io.shiftleft.semanticcpg.language._
+import io.joern.x2cpg.testfixtures.TestCpg
+import io.shiftleft.semanticcpg.language.*
 
-class CQueryTestSuite extends DataFlowCodeToCpgSuite {
-  val argumentProvider = new QDBArgumentProvider(3)
+class CQueryTestSuite[QB <: QueryBundle](val queryBundle: QB) extends DataFlowCodeToCpgSuite {
 
-  override def beforeAll(): Unit = {
-    semanticsFilename = argumentProvider.testSemanticsFilename
-    super.beforeAll()
-  }
-
-  def queryBundle: QueryBundle = QueryUtil.EmptyBundle
+  private val argumentProvider = new QDBArgumentProvider(3)
 
   def allQueries: List[Query] = QueryUtil.allQueries(queryBundle, argumentProvider)
 
-  def concatedQueryCodeExamples: String =
+  def concatQueryCodeExamples: String =
     allQueries
       .map { q =>
         q.codeExamples.positive
           .mkString("\n")
           .concat("\n")
-          .concat(q.codeExamples.negative
-            .mkString("\n"))
+          .concat(
+            q.codeExamples.negative
+              .mkString("\n")
+          )
       }
       .mkString("\n")
 
-  /**
-    * Used for tests that match names of vulnerable functions
+  /** Used for tests that match names of vulnerable functions
     */
   def findMatchingCalls(query: Query): Set[String] = {
     query(cpg)
@@ -44,5 +39,5 @@ class CQueryTestSuite extends DataFlowCodeToCpgSuite {
       .toSetImmutable
   }
 
-  override val code = concatedQueryCodeExamples
+  protected val cpg: TestCpg = code(concatQueryCodeExamples)
 }

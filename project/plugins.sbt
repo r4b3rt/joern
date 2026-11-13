@@ -1,6 +1,6 @@
-addSbtPlugin("com.simplytyped" % "sbt-antlr4" % "0.8.2")
-addSbtPlugin("com.typesafe.sbt"  % "sbt-native-packager"   % "1.4.1")
-addSbtPlugin("com.geirsson" % "sbt-scalafmt" % "1.5.1")
-addSbtPlugin("io.shiftleft" % "sbt-ci-release-early" % "2.0.18")
-addSbtPlugin("com.dwijnand" % "sbt-dynver" % "4.1.1")
-
+addSbtPlugin("ai.hearn"        % "sbt-antlr4"           % "1.0.0")
+addSbtPlugin("com.github.sbt"  % "sbt-native-packager"  % "1.12.0")
+addSbtPlugin("org.scalameta"   % "sbt-scalafmt"         % "2.6.2")
+addSbtPlugin("io.shiftleft"    % "sbt-ci-release-early" % "2.1.15")
+addSbtPlugin("com.github.sbt"  % "sbt-dynver"           % "5.1.1")
+addSbtPlugin("ch.epfl.scala"   % "sbt-scalafix"         % "0.14.9")

@@ -1,15 +1,13 @@
 package io.joern.scanners.c
 
+import io.joern.console.*
+import io.joern.dataflowengineoss.language.*
+import io.joern.dataflowengineoss.queryengine.EngineContext
+import io.joern.macros.QueryMacros.*
 import io.joern.scanners.{Crew, QueryTags}
 import io.shiftleft.codepropertygraph.generated.Operators
-import io.shiftleft.codepropertygraph.generated.nodes._
-import io.joern.console._
-import io.joern.console._
-import io.shiftleft.semanticcpg.language._
-import io.joern.dataflowengineoss.language._
-import io.joern.dataflowengineoss.queryengine.EngineContext
-import io.joern.dataflowengineoss.semanticsloader.{Parser, Semantics}
-import io.joern.macros.QueryMacros._
+import io.shiftleft.codepropertygraph.generated.nodes.*
+import io.shiftleft.semanticcpg.language.*
 
 object UseAfterFree extends QueryBundle {
 
@@ -91,7 +89,7 @@ object UseAfterFree extends QueryBundle {
           |The function sets a field of a function parameter to a value of a local
           |variable.
           |This variable is then freed in some paths. Unless the value set in the
-          |function |parameter is overridden later on, the caller has access to the
+          |function parameter is overridden later on, the caller has access to the
           |free'd memory, which is undefined behavior.
           |
           |Finds bugs like CVE-2019-18902.
@@ -100,12 +98,13 @@ object UseAfterFree extends QueryBundle {
       withStrRep({ cpg =>
         def outParams =
           cpg.parameter
-            .typeFullName(".+\\*")
+            .code(".+\\*.+")
             .whereNot(
               _.referencingIdentifiers
                 .argumentIndex(1)
                 .inCall
-                .nameExact(Operators.assignment, Operators.addressOf))
+                .nameExact(Operators.assignment, Operators.addressOf)
+            )
 
         def assignedValues =
           outParams.referencingIdentifiers
@@ -119,20 +118,22 @@ object UseAfterFree extends QueryBundle {
             .isIdentifier
 
         def freeAssigned =
-          assignedValues.map(
-            id =>
-              (id,
-               id.refsTo
-                 .flatMap {
-                   case p: MethodParameterIn => p.referencingIdentifiers
-                   case v: Local             => v.referencingIdentifiers
-                 }
-                 .inCall
-                 .name("(.*_)?free")))
+          assignedValues.map(id =>
+            (
+              id,
+              id.refsTo
+                .flatMap {
+                  case p: MethodParameterIn => p.referencingIdentifiers
+                  case v: Local             => v.referencingIdentifiers
+                }
+                .inCall
+                .name("(.*_)?free")
+            )
+          )
 
         freeAssigned
-          .filter {
-            case (id, freeCall) => freeCall.dominatedBy.exists(_ == id)
+          .filter { case (id, freeCall) =>
+            freeCall.dominatedBy.exists(_ == id)
           }
           .flatMap(_._1)
       }),
@@ -173,6 +174,7 @@ object UseAfterFree extends QueryBundle {
   }
 
   @q
+  @scala.annotation.nowarn("cat=deprecation")
   def freePostDominatesUsage(): Query =
     Query.make(
       name = "free-follows-value-reuse",
@@ -191,20 +193,20 @@ object UseAfterFree extends QueryBundle {
           .filter(_.parameter.size == 1)
           .callIn
           .where(_.argument(1).isIdentifier)
-          .flatMap(f => {
+          .flatMap { f =>
             val freedIdentifierCode = f.argument(1).code
-            val postDom = f.postDominatedBy.toSetImmutable
+            val postDom             = f.postDominatedBy.toSetImmutable
 
             val assignedPostDom = postDom.isIdentifier
               .where(_.inAssignment)
               .codeExact(freedIdentifierCode)
-              .flatMap(id => id ++ id.postDominatedBy)
+              .flatMap(id => Iterator.single(id) ++ id.postDominatedBy)
 
             postDom
               .removedAll(assignedPostDom)
               .isIdentifier
               .codeExact(freedIdentifierCode)
-          })
+          }
       }),
       tags = List(QueryTags.uaf),
       codeExamples = CodeExamples(
@@ -235,7 +237,7 @@ object UseAfterFree extends QueryBundle {
           |  if (cond) {
           |    free(x);
           |    if (cond2)
-          |      return x; // not post-dominated by free call
+          |      return x; // doesn't post-dominate the free call
           |    x = NULL;
           |  }
           |  return x;

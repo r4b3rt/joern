@@ -1,8 +1,8 @@
 package io.joern.dataflowengineoss.queryengine
 
-import io.shiftleft.codepropertygraph.generated.nodes._
-import io.shiftleft.semanticcpg.accesspath._
-import io.shiftleft.semanticcpg.language.{AccessPathHandling, toCallMethods}
+import io.shiftleft.codepropertygraph.generated.nodes.*
+import io.shiftleft.semanticcpg.accesspath.*
+import io.shiftleft.semanticcpg.language.*
 import io.shiftleft.semanticcpg.utils.MemberAccess
 import org.slf4j.LoggerFactory
 
@@ -30,15 +30,18 @@ object AccessPathUsage {
         case call: Call if !MemberAccess.isGenericMemberAccessName(call.name) => (TrackedReturnValue(call), Nil)
 
         case memberAccess: Call =>
-          //assume: MemberAccess.isGenericMemberAccessName(call.name)
+          // assume: MemberAccess.isGenericMemberAccessName(call.name)
           val argOne = memberAccess.argumentOption(1)
           if (argOne.isEmpty) {
             logger.warn(s"Missing first argument on call ${memberAccess.code}.")
             return (TrackedUnknown, Nil)
           }
           val (base, tail) = toTrackedBaseAndAccessPathInternal(argOne.get)
-          val path = AccessPathHandling.memberAccessToPath(memberAccess, tail)
+          val path         = AccessPathHandling.memberAccessToPath(memberAccess, tail)
           (base, path)
+        case _ =>
+          logger.warn(s"Missing handling for node type ${node.getClass}.")
+          (TrackedUnknown, Nil)
       }
     }
   }

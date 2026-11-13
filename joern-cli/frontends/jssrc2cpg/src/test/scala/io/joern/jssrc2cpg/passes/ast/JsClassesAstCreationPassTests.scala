@@ -1,0 +1,551 @@
+package io.joern.jssrc2cpg.passes.ast
+
+import io.joern.jssrc2cpg.testfixtures.JsSrc2CpgSuite
+import io.joern.x2cpg.Defines
+import io.shiftleft.codepropertygraph.generated.{ControlStructureTypes, ModifierTypes, Operators}
+import io.shiftleft.codepropertygraph.generated.nodes.{
+  AstNode,
+  Call,
+  ControlStructure,
+  FieldIdentifier,
+  Identifier,
+  MethodRef,
+  TypeRef
+}
+import io.shiftleft.semanticcpg.language.*
+import org.scalactic.source.Position
+
+class JsClassesAstCreationPassTests extends JsSrc2CpgSuite {
+
+  private def assertFieldAccess(node: AstNode, code: String, base: String, field: String)(implicit
+    pos: Position
+  ): Unit =
+    inside(node) { case access: Call =>
+      access.name shouldBe Operators.fieldAccess
+      access.code shouldBe code
+      access.argument(1).code shouldBe base
+      inside(access.argument(2)) { case member: FieldIdentifier => member.canonicalName shouldBe field }
+    }
+
+  "AST generation for JS classes" should {
+
+    "have ast parent blocks for class locals" in {
+      val cpg = code("""
+        |var x = source();
+        |
+        |class Foo {
+        |  func() {
+        |    sink(x);
+        |  }
+        |}
+        |
+        |function source() {
+        |  return 1;
+        |}
+        |
+        |function sink(par1) {}
+        |""".stripMargin)
+      val List(x1, x2) = cpg.local("x").l
+      x1.parentBlock should not be empty
+      x1.referencingIdentifiers.name.l shouldBe List("x")
+      x2.parentBlock should not be empty
+      x2.referencingIdentifiers.name.l shouldBe List("x")
+    }
+
+    "have a TYPE_DECL for ClassA" in {
+      val cpg = code("var x = class ClassA {}")
+      cpg.typeDecl.nameExact("ClassA").fullNameExact("Test0.js::program:ClassA").size shouldBe 1
+    }
+
+    "have a synthetic assignment for ClassA" in {
+      val cpg = code("class ClassA {}")
+      cpg.typeDecl.nameExact("ClassA").fullNameExact("Test0.js::program:ClassA").size shouldBe 1
+      inside(cpg.assignment.argument.l) { case List(id: Identifier, typeRef: TypeRef) =>
+        id.name shouldBe "ClassA"
+        id.dynamicTypeHintFullName shouldBe List(s"Test0.js::program:ClassA:${Defines.ConstructorMethodName}")
+        typeRef.code shouldBe "class ClassA"
+        typeRef.typeFullName shouldBe s"Test0.js::program:ClassA:${Defines.ConstructorMethodName}"
+      }
+    }
+
+    "have locals / closure bindings for implicit variables from class definitions" in {
+      val cpg = code("""
+        |class A {}
+        |function b() {
+        |  new A();
+        |}""".stripMargin)
+      cpg.typeDecl.nameExact("A").fullNameExact("Test0.js::program:A").size shouldBe 1
+      val List(localA) = cpg.method.name(":program").local.name("A").l
+      localA.code shouldBe "A"
+      val List(funcLocalA) = cpg.method.name("b").local.name("A").l
+      funcLocalA.code shouldBe "A"
+      funcLocalA.closureBindingId shouldBe Option("Test0.js::program:b:A")
+    }
+
+    "have a member function for static method in TYPE_DECL for ClassA" in {
+      val cpg = code("""
+       |var x = class ClassA {
+       |  static staticFoo() {}
+       |}""".stripMargin)
+      val List(classATypeDecl)         = cpg.typeDecl.nameExact("ClassA").fullNameExact("Test0.js::program:ClassA").l
+      val List(constructor, staticFoo) = classATypeDecl.method.l
+      constructor.fullName shouldBe s"Test0.js::program:ClassA:${io.joern.x2cpg.Defines.ConstructorMethodName}"
+      constructor.code shouldBe "constructor() {}"
+      constructor.modifier.modifierType.l shouldBe List(ModifierTypes.VIRTUAL, ModifierTypes.CONSTRUCTOR)
+      staticFoo.fullName shouldBe "Test0.js::program:ClassA:staticFoo"
+      staticFoo.code shouldBe "static staticFoo() {}"
+      staticFoo.modifier.modifierType.l shouldBe List(ModifierTypes.VIRTUAL, ModifierTypes.STATIC)
+    }
+
+    "have the member for a static method in the constructor TYPE_DECL and not in the class TYPE_DECL" in {
+      val cpg = code("""
+        |class ClassA {
+        |  static staticFoo() {}
+        |  foo() {}
+        |}""".stripMargin)
+      val List(classATypeDecl) = cpg.typeDecl.nameExact("ClassA").fullNameExact("Test0.js::program:ClassA").l
+      val List(foo)            = classATypeDecl.member.l
+      foo.name shouldBe "foo"
+      foo.dynamicTypeHintFullName shouldBe Seq("Test0.js::program:ClassA:foo")
+
+      val constructorFullName       = s"Test0.js::program:ClassA:${io.joern.x2cpg.Defines.ConstructorMethodName}"
+      val List(constructorTypeDecl) = cpg.typeDecl.fullNameExact(constructorFullName).l
+      val List(staticFoo)           = constructorTypeDecl.member.l
+      staticFoo.name shouldBe "staticFoo"
+      staticFoo.code shouldBe "static staticFoo() {}"
+      staticFoo.dynamicTypeHintFullName shouldBe Seq("Test0.js::program:ClassA:staticFoo")
+      staticFoo.modifier.modifierType.l shouldBe List(ModifierTypes.STATIC)
+    }
+
+    "have the member for a static field in the constructor TYPE_DECL and not in the class TYPE_DECL" in {
+      val cpg = code("""
+        |class ClassA {
+        |  static staticField = 1
+        |  static #privateStaticField = 2
+        |  field = 3
+        |}""".stripMargin)
+      val List(classATypeDecl) = cpg.typeDecl.nameExact("ClassA").fullNameExact("Test0.js::program:ClassA").l
+      classATypeDecl.member.name.l shouldBe List("field")
+
+      val constructorFullName       = s"Test0.js::program:ClassA:${io.joern.x2cpg.Defines.ConstructorMethodName}"
+      val List(constructorTypeDecl) = cpg.typeDecl.fullNameExact(constructorFullName).l
+      constructorTypeDecl.member.isStatic.name.l shouldBe List("staticField", "#privateStaticField")
+      constructorTypeDecl.member.nameExact("#privateStaticField").modifier.modifierType.l shouldBe
+        List(ModifierTypes.STATIC, ModifierTypes.PRIVATE)
+    }
+
+    "have separate members for a private and a public field of the same name" in {
+      val cpg = code("""
+        |class ClassA {
+        |  #b = 1
+        |  b = 2
+        |  #m() {}
+        |  m() { return this.#b + this.b }
+        |}""".stripMargin)
+      val List(classATypeDecl) = cpg.typeDecl.nameExact("ClassA").fullNameExact("Test0.js::program:ClassA").l
+      classATypeDecl.member.name.l shouldBe List("#b", "b", "#m", "m")
+
+      val List(constructor)        = classATypeDecl.method.nameExact(io.joern.x2cpg.Defines.ConstructorMethodName).l
+      val List(bInit, bPublicInit) = constructor.block.astChildren.isCall.isAssignment.l
+      assertFieldAccess(bInit.argument(1), "this.#b", "this", "#b")
+      assertFieldAccess(bPublicInit.argument(1), "this.b", "this", "b")
+      cpg.method.nameExact("m").ast.isFieldIdentifier.canonicalName.l shouldBe List("#b", "b")
+    }
+
+    "have members named after the key and lift the values for fields declared with the accessor keyword" in {
+      val cpg = code("""
+        |class ClassA {
+        |  accessor a = 1
+        |  static accessor b = 2
+        |  accessor #c = 3
+        |  accessor [d] = 4
+        |}""".stripMargin)
+      val List(classATypeDecl) = cpg.typeDecl.nameExact("ClassA").fullNameExact("Test0.js::program:ClassA").l
+      classATypeDecl.member.name.l shouldBe List("a", "#c", "d")
+      classATypeDecl.member.nameExact("#c").modifier.modifierType.l shouldBe List(ModifierTypes.PRIVATE)
+
+      val constructorFullName       = s"Test0.js::program:ClassA:${io.joern.x2cpg.Defines.ConstructorMethodName}"
+      val List(constructorTypeDecl) = cpg.typeDecl.fullNameExact(constructorFullName).l
+      constructorTypeDecl.member.isStatic.name.l shouldBe List("b")
+
+      val List(constructor)         = classATypeDecl.method.nameExact(io.joern.x2cpg.Defines.ConstructorMethodName).l
+      val List(aInit, cInit, dInit) = constructor.block.astChildren.isCall.isAssignment.l
+      aInit.code shouldBe "accessor a = 1"
+      assertFieldAccess(aInit.argument(1), "this.a", "this", "a")
+      aInit.argument(2).code shouldBe "1"
+      cInit.code shouldBe "accessor #c = 3"
+      assertFieldAccess(cInit.argument(1), "this.#c", "this", "#c")
+      cInit.argument(2).code shouldBe "3"
+      dInit.code shouldBe "accessor [d] = 4"
+      inside(dInit.argument(1)) { case access: Call =>
+        access.name shouldBe Operators.indexAccess
+        access.code shouldBe "this[d]"
+        access.argument(1).code shouldBe "this"
+        inside(access.argument(2)) { case key: Identifier => key.name shouldBe "d" }
+      }
+      dInit.argument(2).code shouldBe "4"
+
+      val List(clInit) = constructorTypeDecl.method.nameExact(io.joern.x2cpg.Defines.StaticInitMethodName).l
+      clInit.fullName shouldBe s"$constructorFullName:${io.joern.x2cpg.Defines.StaticInitMethodName}"
+      classATypeDecl.method.nameExact(io.joern.x2cpg.Defines.StaticInitMethodName) shouldBe empty
+      val List(bInit) = clInit.block.astChildren.isCall.isAssignment.l
+      bInit.code shouldBe "static accessor b = 2"
+      assertFieldAccess(bInit.argument(1), "ClassA.b", "ClassA", "b")
+      inside(bInit.argument(1).astChildren.isTypeRef.l) { case List(classRef) =>
+        classRef.typeFullName shouldBe constructorFullName
+      }
+      bInit.argument(2).code shouldBe "2"
+    }
+
+    "initialize fields through an access of this (instance) and of the class (static)" in {
+      val cpg = code("""
+        |class ClassA {
+        |  a = 1
+        |  #b = 2
+        |  "c d" = 3;
+        |  [e] = 4
+        |  static f = 5
+        |  static #g = 6
+        |  static [h] = 7
+        |}""".stripMargin)
+      val List(constructor)                = cpg.method.nameExact(io.joern.x2cpg.Defines.ConstructorMethodName).l
+      val List(aInit, bInit, cInit, eInit) = constructor.block.astChildren.isCall.isAssignment.l
+      assertFieldAccess(aInit.argument(1), "this.a", "this", "a")
+      assertFieldAccess(bInit.argument(1), "this.#b", "this", "#b")
+      inside(cInit.argument(1)) { case access: Call =>
+        access.name shouldBe Operators.indexAccess
+        access.code shouldBe "this[\"c d\"]"
+        access.argument(2).code shouldBe "\"c d\""
+      }
+      inside(eInit.argument(1)) { case access: Call =>
+        access.name shouldBe Operators.indexAccess
+        access.code shouldBe "this[e]"
+      }
+      constructor.block.astChildren.isCall.isAssignment.argument(1).ast.isIdentifier.nameExact("this").foreach {
+        thisIdentifier => thisIdentifier.dynamicTypeHintFullName shouldBe List("Test0.js::program:ClassA")
+      }
+
+      val List(clInit)              = cpg.method.nameExact(io.joern.x2cpg.Defines.StaticInitMethodName).l
+      val List(fInit, gInit, hInit) = clInit.block.astChildren.isCall.isAssignment.l
+      assertFieldAccess(fInit.argument(1), "ClassA.f", "ClassA", "f")
+      assertFieldAccess(gInit.argument(1), "ClassA.#g", "ClassA", "#g")
+      inside(hInit.argument(1)) { case access: Call =>
+        access.name shouldBe Operators.indexAccess
+        access.code shouldBe "ClassA[h]"
+      }
+    }
+
+    "initialize enum members through an access of the enum" in {
+      val cpg = code(
+        """
+        |enum E {
+        |  A = 1,
+        |  "b c" = 2
+        |}""".stripMargin,
+        "Test0.ts"
+      )
+      val List(clInit)       = cpg.method.nameExact(io.joern.x2cpg.Defines.StaticInitMethodName).l
+      val List(aInit, bInit) = clInit.block.astChildren.isCall.isAssignment.l
+      assertFieldAccess(aInit.argument(1), "E.A", "E", "A")
+      inside(bInit.argument(1)) { case access: Call =>
+        access.name shouldBe Operators.indexAccess
+        access.code shouldBe "E[\"b c\"]"
+      }
+    }
+
+    "have member for non-static method in TYPE_DECL for ClassA" in {
+      val cpg = code("""
+        |class ClassA {
+        |  foo() {}
+        |  [Symbol.iterator]() {}
+        |}""".stripMargin)
+      val List(classATypeDecl)       = cpg.typeDecl.nameExact("ClassA").fullNameExact("Test0.js::program:ClassA").l
+      val List(constructor, foo, it) = classATypeDecl.method.l
+      constructor.fullName shouldBe s"Test0.js::program:ClassA:${io.joern.x2cpg.Defines.ConstructorMethodName}"
+      constructor.code shouldBe "constructor() {}"
+      constructor.modifier.modifierType.l shouldBe List(ModifierTypes.VIRTUAL, ModifierTypes.CONSTRUCTOR)
+      foo.fullName shouldBe "Test0.js::program:ClassA:foo"
+      foo.code shouldBe "foo() {}"
+      foo.modifier.modifierType.l shouldBe List(ModifierTypes.VIRTUAL)
+      it.fullName shouldBe "Test0.js::program:ClassA:Symbol.iterator"
+      it.code shouldBe "[Symbol.iterator]() {}"
+      it.modifier.modifierType.l shouldBe List(ModifierTypes.VIRTUAL)
+    }
+
+    "have member with initialization in TYPE_DECL for ClassA" in {
+      val cpg = code("""
+        |class ClassA {
+        |  a = 1
+        |  b = "foo"
+        |  static c = true
+        |  static d
+        |  static {
+        |    this.d = false
+        |  }
+        |  constructor(param1, param2) {
+        |    // also register e and f as dynamically declared members
+        |    this.e = param1;
+        |    this.f = param2;
+        |    // chained access should not result in member creation
+        |    this.f.g = param2;
+        |  }
+        |}""".stripMargin)
+      val List(classATypeDecl) = cpg.typeDecl.nameExact("ClassA").fullNameExact("Test0.js::program:ClassA").l
+      val List(a, b, e, f)     = classATypeDecl.member.not(_.isStatic).l
+      a.name shouldBe "a"
+      a.code shouldBe "a = 1"
+      a.lineNumber shouldBe Option(3)
+      a.columnNumber shouldBe Option(2)
+      b.name shouldBe "b"
+      b.code shouldBe """b = "foo""""
+      b.lineNumber shouldBe Option(4)
+      b.columnNumber shouldBe Option(2)
+      e.name shouldBe "e"
+      e.code shouldBe "this.e = param1;"
+      e.lineNumber shouldBe Option(12)
+      e.columnNumber shouldBe Option(4)
+      f.name shouldBe "f"
+      f.code shouldBe "this.f = param2;"
+      f.lineNumber shouldBe Option(13)
+      f.columnNumber shouldBe Option(4)
+
+      classATypeDecl.member.isStatic.l shouldBe empty
+      val constructorFullName       = s"Test0.js::program:ClassA:${io.joern.x2cpg.Defines.ConstructorMethodName}"
+      val List(constructorTypeDecl) = cpg.typeDecl.fullNameExact(constructorFullName).l
+      val List(c, d)                = constructorTypeDecl.member.isStatic.l
+      c.name shouldBe "c"
+      c.code shouldBe "static c = true"
+      d.name shouldBe "d"
+      d.code shouldBe "static d"
+
+      val List(clInitMethod) = constructorTypeDecl.method.nameExact(io.joern.x2cpg.Defines.StaticInitMethodName).l
+      val List(cInitCall, dInitCall) = clInitMethod.block.astChildren.isCall.isAssignment.l
+      cInitCall.code shouldBe "static c = true"
+      dInitCall.code shouldBe "this.d = false"
+
+      val List(constructor) =
+        cpg.typeDecl.nameExact("ClassA").method.nameExact(io.joern.x2cpg.Defines.ConstructorMethodName).l
+      val List(aInitCall, bInitCall, eInitCall, fInitCall, gCall) = constructor.block.astChildren.isCall.isAssignment.l
+      aInitCall.code shouldBe "a = 1"
+      bInitCall.code shouldBe """b = "foo""""
+      eInitCall.code shouldBe "this.e = param1"
+      fInitCall.code shouldBe "this.f = param2"
+      gCall.code shouldBe "this.f.g = param2"
+    }
+
+    "have method for non-static method in ClassA AST" in {
+      val cpg = code("""
+        |var x = class ClassA {
+        |  foo() {}
+        |}""".stripMargin)
+      val List(classATypeDecl) = cpg.typeDecl.nameExact("ClassA").fullNameExact("Test0.js::program:ClassA").l
+      val List(methodFoo)      = classATypeDecl.method.nameExact("foo").l
+      methodFoo.fullName shouldBe "Test0.js::program:ClassA:foo"
+      methodFoo.code shouldBe "foo() {}"
+    }
+
+    "have TYPE_REF to ClassA" in {
+      val cpg                   = code("var x = class ClassA {}")
+      val List(program)         = cpg.method.nameExact(":program").l
+      val List(programBlock)    = program.astChildren.isBlock.l
+      val List(assignmentToTmp) = programBlock.astChildren.isCall.l
+      val List(rhs)             = assignmentToTmp._typeRefViaAstOut.l
+      rhs.typeFullName shouldBe s"Test0.js::program:ClassA:${Defines.ConstructorMethodName}"
+    }
+
+    "have a TYPE_REF to the constructor and not to the instance type for a class expression" in {
+      val cpg = code("module.exports = class Foo {}")
+      inside(cpg.assignment.argument(2).l) { case List(typeRef: TypeRef) =>
+        typeRef.code shouldBe "class Foo"
+        typeRef.typeFullName shouldBe s"Test0.js::program:Foo:${Defines.ConstructorMethodName}"
+      }
+    }
+
+    "have a single TYPE_REF to the constructor and no METHOD_REF for a class declaration" in {
+      val cpg = code("class Foo {}")
+      inside(cpg.assignment.argument(2).l) { case List(typeRef: TypeRef) =>
+        typeRef.code shouldBe "class Foo"
+        typeRef.typeFullName shouldBe s"Test0.js::program:Foo:${Defines.ConstructorMethodName}"
+      }
+      cpg.typeRef.codeExact("class Foo").size shouldBe 1
+      cpg.methodRef shouldBe empty
+    }
+
+    "have correct structure for type decls for classes with extends" in {
+      val cpg                  = code("class ClassA extends Base {}")
+      val List(classATypeDecl) = cpg.typeDecl.nameExact("ClassA").nameExact("ClassA").l
+      classATypeDecl.inheritsFromTypeFullName shouldBe Seq("Base")
+    }
+  }
+
+  "AST generation for constructor" should {
+    "have correct structure for simple new" in {
+      val cpg                = code("new MyClass();")
+      val List(program)      = cpg.method.nameExact(":program").l
+      val List(programBlock) = program.astChildren.isBlock.l
+      val List(newCallBlock) = programBlock.astChildren.isBlock.codeExact("new MyClass()").l
+      val tmpName            = "_tmp_0"
+      val List(localTmp)     = newCallBlock.astChildren.isLocal.l
+      localTmp.name shouldBe tmpName
+
+      val List(tmpAssignment) = newCallBlock.astChildren.isCall.codeExact(s"$tmpName = .alloc").l
+      tmpAssignment.name shouldBe Operators.assignment
+
+      val List(tmp) = tmpAssignment.astChildren.isIdentifier.l
+      tmp.code shouldBe tmpName
+      tmp.name shouldBe tmpName
+
+      val List(allocCall) = tmpAssignment.astChildren.isCall.l
+      allocCall.name shouldBe Operators.alloc
+      allocCall.code shouldBe ".alloc"
+
+      val List(constructorCall) = newCallBlock.astChildren.isCall.codeExact("new MyClass()").l
+      constructorCall.name shouldBe "<operator>.new"
+      constructorCall.astChildren.isIdentifier.nameExact("MyClass").size shouldBe 1
+
+      val List(receiver) = constructorCall.receiver.isIdentifier.nameExact("MyClass").l
+      receiver.argumentIndex shouldBe -1
+
+      val List(tmpArg0) = constructorCall.astChildren.isIdentifier.nameExact(tmpName).l
+      tmpArg0.argumentIndex shouldBe 0
+
+      val List(tmpArg0Argument) = constructorCall.argument.isIdentifier.nameExact(tmpName).l
+      tmpArg0Argument.argumentIndex shouldBe 0
+
+      val List(returnTmp) = newCallBlock.astChildren.isIdentifier.l
+      returnTmp.name shouldBe tmpName
+    }
+
+    "have correct structure for simple new with arguments" in {
+      val cpg                = code("new MyClass(arg1, arg2);")
+      val List(program)      = cpg.method.nameExact(":program").l
+      val List(programBlock) = program.astChildren.isBlock.l
+      val List(newCallBlock) = programBlock.astChildren.isBlock.codeExact("new MyClass(arg1, arg2)").l
+      val tmpName            = "_tmp_0"
+
+      val List(localTmp) = newCallBlock.astChildren.isLocal.l
+      localTmp.name shouldBe tmpName
+
+      val List(tmpAssignment) = newCallBlock.astChildren.isCall.codeExact(s"$tmpName = .alloc").l
+      tmpAssignment.name shouldBe Operators.assignment
+
+      val List(tmp) = tmpAssignment.astChildren.isIdentifier.l
+      tmp.name shouldBe tmpName
+      tmp.code shouldBe tmpName
+
+      val List(allocCall) = tmpAssignment.astChildren.isCall.l
+      allocCall.name shouldBe Operators.alloc
+      allocCall.code shouldBe ".alloc"
+
+      val List(constructorCall) = newCallBlock.astChildren.isCall.codeExact("new MyClass(arg1, arg2)").l
+      constructorCall.astChildren.isIdentifier.nameExact("MyClass").size shouldBe 1
+
+      val List(receiver) = constructorCall.receiver.isIdentifier.nameExact("MyClass").l
+      receiver.argumentIndex shouldBe -1
+
+      val List(tmpArg0) = constructorCall.astChildren.isIdentifier.nameExact(tmpName).l
+      tmpArg0.argumentIndex shouldBe 0
+
+      val List(tmpArg0Argument) = constructorCall.argument.isIdentifier.nameExact(tmpName).l
+      tmpArg0Argument.argumentIndex shouldBe 0
+
+      val List(arg1) = constructorCall.astChildren.isIdentifier.nameExact("arg1").l
+      arg1.argumentIndex shouldBe 1
+
+      val List(arg1Argument) = constructorCall.argument.isIdentifier.nameExact("arg1").l
+      arg1Argument.argumentIndex shouldBe 1
+
+      val List(arg2) = constructorCall.astChildren.isIdentifier.nameExact("arg2").l
+      arg2.argumentIndex shouldBe 2
+
+      val List(arg2Argument) = constructorCall.argument.isIdentifier.nameExact("arg2").l
+      arg2Argument.argumentIndex shouldBe 2
+
+      val List(returnTmp) = newCallBlock.astChildren.isIdentifier.l
+      returnTmp.name shouldBe tmpName
+    }
+
+    "have correct structure for new with access path" in {
+      val cpg                = code("new foo.bar.MyClass();")
+      val List(program)      = cpg.method.nameExact(":program").l
+      val List(programBlock) = program.astChildren.isBlock.l
+      val List(newCallBlock) = programBlock.astChildren.isBlock.codeExact("new foo.bar.MyClass()").l
+      val tmpName            = "_tmp_0"
+
+      val List(localTmp) = newCallBlock.astChildren.isLocal.l
+      localTmp.name shouldBe tmpName
+
+      val List(tmpAssignment) = newCallBlock.astChildren.isCall.codeExact(s"$tmpName = .alloc").l
+      tmpAssignment.name shouldBe Operators.assignment
+
+      val List(tmp) = tmpAssignment.astChildren.isIdentifier.l
+      tmp.name shouldBe tmpName
+      tmp.code shouldBe tmpName
+
+      val List(allocCall) = tmpAssignment.astChildren.isCall.l
+      allocCall.name shouldBe Operators.alloc
+      allocCall.code shouldBe ".alloc"
+
+      val List(constructorCall) = newCallBlock.astChildren.isCall.codeExact("new foo.bar.MyClass()").l
+      constructorCall.name shouldBe "<operator>.new"
+
+      val List(path) = constructorCall.astChildren.isCall.codeExact("foo.bar.MyClass").l
+      path.name shouldBe Operators.fieldAccess
+
+      val List(receiver) = constructorCall.receiver.isCall.codeExact("foo.bar.MyClass").l
+      receiver.name shouldBe Operators.fieldAccess
+      receiver.argumentIndex shouldBe -1
+
+      val List(tmpArg0) = constructorCall.astChildren.isIdentifier.nameExact(tmpName).l
+      tmpArg0.argumentIndex shouldBe 0
+
+      val List(tmpArg0Argument) = constructorCall.argument.isIdentifier.nameExact(tmpName).l
+      tmpArg0Argument.argumentIndex shouldBe 0
+
+      val List(returnTmp) = newCallBlock.astChildren.isIdentifier.l
+      returnTmp.name shouldBe tmpName
+    }
+
+    "have correct structure for throw new exceptions" in {
+      val cpg             = code("function foo() { throw new Foo(); }")
+      val List(fooBlock)  = cpg.method.nameExact("foo").astChildren.isBlock.l
+      val List(throwNode) = fooBlock.astChildren.isControlStructure.codeExact("throw new Foo();").l
+      throwNode.controlStructureType shouldBe ControlStructureTypes.THROW
+
+      val List(newCallBlock) = throwNode.astChildren.isBlock.codeExact("new Foo()").l
+      throwNode.argumentOut.l shouldBe List(newCallBlock)
+      val tmpName = "_tmp_0"
+
+      val List(localTmp) = newCallBlock.astChildren.isLocal.l
+      localTmp.name shouldBe tmpName
+
+      val List(tmpAssignment) = newCallBlock.astChildren.isCall.codeExact(s"$tmpName = .alloc").l
+      tmpAssignment.name shouldBe Operators.assignment
+
+      val List(tmp) = tmpAssignment.astChildren.isIdentifier.l
+      tmp.name shouldBe tmpName
+      tmp.code shouldBe tmpName
+
+      val List(allocCall) = tmpAssignment.astChildren.isCall.l
+      allocCall.name shouldBe Operators.alloc
+      allocCall.code shouldBe ".alloc"
+
+      val List(constructorCall) = newCallBlock.astChildren.isCall.codeExact("new Foo()").l
+      constructorCall.name shouldBe "<operator>.new"
+      constructorCall.astChildren.isIdentifier.nameExact("Foo").size shouldBe 1
+
+      val List(receiver) = constructorCall.receiver.isIdentifier.nameExact("Foo").l
+      receiver.argumentIndex shouldBe -1
+
+      val List(tmpArg0) = constructorCall.astChildren.isIdentifier.nameExact(tmpName).l
+      tmpArg0.argumentIndex shouldBe 0
+
+      val List(tmpArg0Argument) = constructorCall.argument.isIdentifier.nameExact(tmpName).l
+      tmpArg0Argument.argumentIndex shouldBe 0
+
+      val List(returnTmp) = newCallBlock.astChildren.isIdentifier.l
+      returnTmp.name shouldBe tmpName
+    }
+  }
+
+}

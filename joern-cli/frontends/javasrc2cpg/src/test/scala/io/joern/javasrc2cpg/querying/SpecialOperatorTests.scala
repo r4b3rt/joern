@@ -1,14 +1,13 @@
 package io.joern.javasrc2cpg.querying
 
-import io.joern.javasrc2cpg.testfixtures.JavaSrcCodeToCpgFixture
+import io.joern.javasrc2cpg.testfixtures.JavaSrcCode2CpgFixture
+import io.shiftleft.codepropertygraph.generated.DispatchTypes
 import io.shiftleft.codepropertygraph.generated.nodes.{Identifier, TypeRef}
-import io.shiftleft.proto.cpg.Cpg.DispatchTypes
-import io.shiftleft.semanticcpg.language._
+import io.shiftleft.semanticcpg.language.*
 
-class SpecialOperatorTests extends JavaSrcCodeToCpgFixture {
+class SpecialOperatorTests extends JavaSrcCode2CpgFixture {
 
-  override val code: String =
-    """
+  val cpg = code("""
       |public class Foo {
       |  public void foo(Object o) {
       |    if (o instanceof String) {
@@ -21,17 +20,16 @@ class SpecialOperatorTests extends JavaSrcCodeToCpgFixture {
       |    System.out.println(s);
       |  }
       |}
-      |""".stripMargin
+      |""".stripMargin)
 
   "it should create a call to `<operator>.instanceOf` with the correct arguments" in {
     val call = cpg.call.nameExact("<operator>.instanceOf").head
 
     call.argument.size shouldBe 2
     call.order shouldBe 1
-    call.argumentIndex shouldBe 1
-    call.dispatchType shouldBe DispatchTypes.STATIC_DISPATCH.toString
+    call.dispatchType shouldBe DispatchTypes.STATIC_DISPATCH
 
-    val List(o: Identifier, t: TypeRef) = call.argument.l
+    val List(o: Identifier, t: TypeRef) = call.argument.l: @unchecked
     o.code shouldBe "o"
     o.order shouldBe 1
     o.argumentIndex shouldBe 1
@@ -53,9 +51,9 @@ class SpecialOperatorTests extends JavaSrcCodeToCpgFixture {
     call.argument.size shouldBe 2
     call.order shouldBe 2
     call.argumentIndex shouldBe 2
-    call.dispatchType shouldBe DispatchTypes.STATIC_DISPATCH.toString
+    call.dispatchType shouldBe DispatchTypes.STATIC_DISPATCH
 
-    val List(t: TypeRef, i: Identifier) = call.argument.l
+    val List(t: TypeRef, i: Identifier) = call.argument.l: @unchecked
 
     t.order shouldBe 1
     t.argumentIndex shouldBe 1

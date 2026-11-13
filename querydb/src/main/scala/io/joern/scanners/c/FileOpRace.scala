@@ -1,14 +1,11 @@
 package io.joern.scanners.c
 
-import io.joern.scanners.{Crew, QueryTags}
-import io.shiftleft.codepropertygraph.generated.nodes._
-import io.joern.console._
-import io.joern.console._
+import io.joern.console.*
 import io.joern.dataflowengineoss.queryengine.EngineContext
-import io.joern.dataflowengineoss.semanticsloader.Semantics
-import io.shiftleft.semanticcpg.language._
-import io.joern.macros.QueryMacros._
-import overflowdb.traversal.Traversal
+import io.joern.macros.QueryMacros.*
+import io.joern.scanners.{Crew, QueryTags}
+import io.shiftleft.codepropertygraph.generated.nodes.*
+import io.shiftleft.semanticcpg.language.*
 
 object FileOpRace extends QueryBundle {
 
@@ -28,46 +25,46 @@ object FileOpRace extends QueryBundle {
       score = 3.0,
       withStrRep({ cpg =>
         val operations: Map[String, Seq[Int]] = Map(
-          "access" -> Seq(1),
-          "chdir" -> Seq(1),
-          "chmod" -> Seq(1),
-          "chown" -> Seq(1),
-          "creat" -> Seq(1),
-          "faccessat" -> Seq(2),
-          "fchmodat" -> Seq(2),
-          "fopen" -> Seq(1),
-          "fstatat" -> Seq(2),
-          "lchown" -> Seq(1),
-          "linkat" -> Seq(2, 4),
-          "link" -> Seq(1, 2),
-          "lstat" -> Seq(1),
-          "mkdirat" -> Seq(2),
-          "mkdir" -> Seq(1),
-          "mkfifoat" -> Seq(2),
-          "mkfifo" -> Seq(1),
-          "mknodat" -> Seq(2),
-          "mknod" -> Seq(1),
-          "openat" -> Seq(2),
-          "open" -> Seq(1),
+          "access"     -> Seq(1),
+          "chdir"      -> Seq(1),
+          "chmod"      -> Seq(1),
+          "chown"      -> Seq(1),
+          "creat"      -> Seq(1),
+          "faccessat"  -> Seq(2),
+          "fchmodat"   -> Seq(2),
+          "fopen"      -> Seq(1),
+          "fstatat"    -> Seq(2),
+          "lchown"     -> Seq(1),
+          "linkat"     -> Seq(2, 4),
+          "link"       -> Seq(1, 2),
+          "lstat"      -> Seq(1),
+          "mkdirat"    -> Seq(2),
+          "mkdir"      -> Seq(1),
+          "mkfifoat"   -> Seq(2),
+          "mkfifo"     -> Seq(1),
+          "mknodat"    -> Seq(2),
+          "mknod"      -> Seq(1),
+          "openat"     -> Seq(2),
+          "open"       -> Seq(1),
           "readlinkat" -> Seq(2),
-          "readlink" -> Seq(1),
-          "renameat" -> Seq(2, 4),
-          "rename" -> Seq(1, 2),
-          "rmdir" -> Seq(1),
-          "stat" -> Seq(1),
-          "unlinkat" -> Seq(2),
-          "unlink" -> Seq(1)
+          "readlink"   -> Seq(1),
+          "renameat"   -> Seq(2, 4),
+          "rename"     -> Seq(1, 2),
+          "rmdir"      -> Seq(1),
+          "stat"       -> Seq(1),
+          "unlinkat"   -> Seq(2),
+          "unlink"     -> Seq(1)
         )
 
-        def fileCalls(calls: Traversal[Call]) =
-          calls.nameExact(operations.keys.toSeq: _*)
+        def fileCalls(calls: Iterator[Call]) =
+          calls.nameExact(operations.keys.toSeq*)
 
         def fileArgs(c: Call) =
-          c.argument.whereNot(_.isLiteral).argumentIndex(operations(c.name): _*)
+          c.argument.whereNot(_.isLiteral).argumentIndex(operations(c.name)*)
 
         fileCalls(cpg.call)
           .filter(call => {
-            val otherCalls = fileCalls(call.method.ast.isCall).filter(_ != call)
+            val otherCalls        = fileCalls(call.method.ast.isCall).filter(_ != call)
             val argsForOtherCalls =
               otherCalls.flatMap(c => fileArgs(c)).code.toSet
 

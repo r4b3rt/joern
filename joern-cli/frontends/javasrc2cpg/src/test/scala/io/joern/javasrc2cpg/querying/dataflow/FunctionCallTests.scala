@@ -1,8 +1,93 @@
 package io.joern.javasrc2cpg.querying.dataflow
 
-import io.joern.javasrc2cpg.testfixtures.JavaDataflowFixture
-import io.joern.dataflowengineoss.language._
-import io.shiftleft.semanticcpg.language._
+import io.joern.javasrc2cpg.testfixtures.{JavaDataflowFixture, JavaSrcCode2CpgFixture}
+import io.joern.dataflowengineoss.language.*
+import io.shiftleft.semanticcpg.language.*
+
+class NewFunctionCallTests extends JavaSrcCode2CpgFixture(withOssDataflow = true) {
+  "Dataflow through function calls" should {
+
+    "allow traversing through a method multiple times" in {
+      val cpg = code("""
+          |class Foo{
+          |    String name;
+          |    String getName() {
+          |        return name;
+          |    }
+          |}
+          |class Main{
+          |    public void bar(Foo foo) {
+          |        check(foo.getName());
+          |        sink(foo.getName());
+          |    }
+          |}
+          |""".stripMargin)
+
+      def source = cpg.method("bar").parameter.name("foo")
+      def sink   = cpg.method("sink").parameter.index(1)
+      sink.reachableBy(source).size shouldBe 1
+    }
+
+    "find a path directly via a function argument" in {
+      val cpg = code("""
+          |class Foo {
+          |  public static void printSimpleString(String s) {
+          |    System.out.println(s);
+          |  }
+          |
+          |  public static void test() {
+          |    printSimpleString("MALICIOUS");
+          |  }
+          |}
+          |""".stripMargin)
+
+      val (source, sink) = getMultiFnSourceSink(cpg, "test", "printSimpleString")
+      sink.reachableBy(source).size shouldBe 1
+    }
+
+    "find paths through calls with varargs" when {
+      val cpg = code("""
+          |public class Foo {
+          |  public static void sink(String s) {}
+          |
+          |  public static void processAll(String item, String... moreItems) {
+          |    sink(item);
+          |    for (int i = 0; i < moreItems.length; i++) {
+          |      sink(moreItems[i]);
+          |    }
+          |  }
+          |
+          |  public static void test(String item0, String item1, String item2) {
+          |    processAll(item0, item1, item2);
+          |  }
+          |}
+          |""".stripMargin)
+
+      def sink = cpg.method.name("sink").parameter.l
+
+      "the source is not passed as a vararg argument" in {
+        def source = cpg.method.name("test").parameter.name("item0")
+
+        sink.reachableBy(source).size shouldBe 1
+        sink.reachableByFlows(source).size shouldBe 1
+      }
+
+      "the source is the first vararg argument" in {
+        def source = cpg.method.name("test").parameter.name("item1")
+
+        sink.reachableBy(source).size shouldBe 1
+        sink.reachableByFlows(source).size shouldBe 1
+      }
+
+      "the source is the second vararg argument" in {
+        def source = cpg.method.name("test").parameter.name("item2")
+
+        sink.reachableBy(source).size shouldBe 1
+        sink.reachableByFlows(source).size shouldBe 1
+      }
+    }
+  }
+}
 
 class FunctionCallTests extends JavaDataflowFixture {
 
@@ -214,24 +299,21 @@ class FunctionCallTests extends JavaDataflowFixture {
   it should "find a path where `MALICIOUS` is added to safe input via a called function" in {
     val (source, sink) = getConstSourceSink("test14")
     sink.reachableBy(source).size shouldBe 1
-
   }
 
   it should "not find a path where the `MALICIOUS` arg is overwritten before the sink" in {
     val (source, sink) = getMultiFnSourceSink("test15", "overwrite")
-    // This isn't exactly the expected behaviour, but is on par with c2cpg.
-    sink.reachableBy(source).size shouldBe 1
+    sink.reachableBy(source).size shouldBe 0
   }
 
   it should "not find a path where `MALICIOUS` arg is not included in return" in {
     val (source, sink) = getConstSourceSink("test16")
-    // This isn't exactly the expected behaviour, but is on par with c2cpg.
-    sink.reachableBy(source).size shouldBe 1
+    sink.reachableBy(source).size shouldBe 0
   }
 
   it should "find a path through a cast expression" in {
     def source = cpg.method.name("test17").parameter.index(1)
-    def sink = cpg.method.name("test17").methodReturn
+    def sink   = cpg.method.name("test17").methodReturn
     sink.reachableBy(source).size shouldBe 1
   }
 }

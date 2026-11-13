@@ -1,18 +1,16 @@
 package io.joern.console.scan
 
 import io.joern.console.Query
-import io.shiftleft.codepropertygraph.Cpg
-import io.shiftleft.passes.{DiffGraph, KeyPoolCreator, ParallelCpgPass}
+import io.shiftleft.codepropertygraph.generated.Cpg
+import io.shiftleft.passes.CpgPass
 
-class ScanPass(cpg: Cpg, queries: List[Query])
-    extends ParallelCpgPass[Query](cpg,
-                                   keyPools = Some(KeyPoolCreator.obtain(queries.size.toLong, 42949672950L).iterator)) {
+/** Each query runs the data-flow engine, which is already parallelized. Another layer of parallelism causes undefined
+  * behaviour on the underlying database. This is why we use `CpgPass` instead of `ForkJoinParallelCpgPass` or similar.
+  */
+class ScanPass(cpg: Cpg, queries: List[Query]) extends CpgPass(cpg) {
 
-  override def partIterator: Iterator[Query] = queries.iterator
-
-  override def runOnPart(query: Query): Iterator[DiffGraph] = {
-    val diffGraph = DiffGraph.newBuilder
-    query(cpg).foreach(diffGraph.addNode)
-    Iterator(diffGraph.build())
+  override def run(diffGraph: DiffGraphBuilder): Unit = {
+    queries.flatMap(_.apply(cpg)).foreach(diffGraph.addNode)
   }
+
 }

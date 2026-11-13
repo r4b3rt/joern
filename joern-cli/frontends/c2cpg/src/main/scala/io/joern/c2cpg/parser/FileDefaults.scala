@@ -1,23 +1,40 @@
 package io.joern.c2cpg.parser
 
+import org.apache.commons.lang3.StringUtils
+
 object FileDefaults {
 
-  val C_EXT = ".c"
-  val CC_EXT = ".cc"
-  val CPP_EXT = ".cpp"
-  val C_HEADER_EXT = ".h"
-  val CPP_HEADER_EXT = ".hpp"
-  val OTHER_HEADER_EXT = ".hh"
+  val CExt: String            = ".c"
+  val CppExt: String          = ".cpp"
+  val PreprocessedExt: String = ".i"
 
-  val SOURCE_FILE_EXTENSIONS = Set(C_EXT, CC_EXT, CPP_EXT)
+  val CHeaderFileExtension: String = ".h"
 
-  val HEADER_FILE_EXTENSIONS = Set(C_HEADER_EXT, CPP_HEADER_EXT, OTHER_HEADER_EXT)
+  val CppHeaderFileExtensions: Set[String] =
+    Set(".hpp", ".hh", ".hp", ".hxx", ".h++", ".tcc")
 
-  private val CPP_FILE_EXTENSIONS = Set(CC_EXT, CPP_EXT, CPP_HEADER_EXT)
+  val HeaderFileExtensions: Set[String] =
+    CppHeaderFileExtensions ++ Set(CHeaderFileExtension)
 
-  def isHeaderFile(filePath: String): Boolean =
-    HEADER_FILE_EXTENSIONS.exists(filePath.endsWith)
+  private val CppSourceFileExtensions: Set[String] =
+    Set(".cc", ".cxx", ".cpp", ".cp", ".ccm", ".cxxm", ".c++m")
 
-  def isCPPFile(filePath: String): Boolean =
-    CPP_FILE_EXTENSIONS.exists(filePath.endsWith)
+  val CppFileExtensions: Set[String] =
+    CppSourceFileExtensions ++ CppHeaderFileExtensions
+
+  val SourceFileExtensions: Set[String] =
+    CppSourceFileExtensions ++ Set(CExt)
+
+  def hasCppFileExtension(filePath: String): Boolean =
+    CppFileExtensions.exists(ext => StringUtils.endsWithIgnoreCase(filePath, ext))
+
+  def hasPreprocessedFileExtension(filePath: String): Boolean =
+    StringUtils.endsWithIgnoreCase(filePath, PreprocessedExt)
+
+  def hasCHeaderFileExtension(filePath: String): Boolean =
+    StringUtils.endsWithIgnoreCase(filePath, CHeaderFileExtension)
+
+  def hasCFileExtension(filePath: String): Boolean =
+    StringUtils.endsWithIgnoreCase(filePath, CExt)
+
 }

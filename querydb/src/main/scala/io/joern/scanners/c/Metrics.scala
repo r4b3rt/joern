@@ -1,10 +1,9 @@
 package io.joern.scanners.c
 
-import io.joern.scanners._
-import io.joern.console._
-import io.joern.console._
-import io.shiftleft.semanticcpg.language._
-import io.joern.macros.QueryMacros._
+import io.joern.scanners.*
+import io.joern.console.*
+import io.shiftleft.semanticcpg.language.*
+import io.joern.macros.QueryMacros.*
 
 object Metrics extends QueryBundle {
 
@@ -17,7 +16,7 @@ object Metrics extends QueryBundle {
       description = s"This query identifies functions with more than $n formal parameters",
       score = 1.0,
       withStrRep({ cpg =>
-        cpg.method.internal.filter(_.parameter.size > n)
+        cpg.method.internal.filter(_.parameter.size > n).nameNot("<global>")
       }),
       tags = List(QueryTags.metrics),
       codeExamples = CodeExamples(
@@ -87,7 +86,7 @@ object Metrics extends QueryBundle {
       description = s"This query identifies functions that are more than $n lines long",
       score = 1.0,
       withStrRep({ cpg =>
-        cpg.method.internal.filter(_.numberOfLines > n)
+        cpg.method.internal.filter(_.numberOfLines > n).nameNot("<global>")
       }),
       tags = List(QueryTags.metrics),
       codeExamples = CodeExamples(
@@ -166,7 +165,8 @@ object Metrics extends QueryBundle {
           .filter(
             _.ast.isControlStructure
               .controlStructureType("(FOR|DO|WHILE)")
-              .size > n)
+              .size > n
+          )
           .nameNot("<global>")
       }),
       tags = List(QueryTags.metrics),

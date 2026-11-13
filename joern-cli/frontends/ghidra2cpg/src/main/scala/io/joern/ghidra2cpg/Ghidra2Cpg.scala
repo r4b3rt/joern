@@ -2,81 +2,87 @@ package io.joern.ghidra2cpg
 
 import ghidra.GhidraJarApplicationLayout
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager
-import ghidra.app.util.importer.{AutoImporter, MessageLog}
-import ghidra.framework.model.{Project, ProjectLocator}
-import ghidra.framework.project.{DefaultProject, DefaultProjectManager}
-import ghidra.framework.protocol.ghidra.{GhidraURLConnection, Handler}
+import ghidra.app.util.importer.ProgramLoader
+import ghidra.base.project.GhidraProject
+import ghidra.framework.protocol.ghidra.Handler
 import ghidra.framework.{Application, HeadlessGhidraApplicationConfiguration}
 import ghidra.program.flatapi.FlatProgramAPI
 import ghidra.program.model.listing.Program
-import ghidra.program.util.{DefinedDataIterator, GhidraProgramUtilities}
+import ghidra.program.util.{DefinedStringIterator, GhidraProgramUtilities}
 import ghidra.util.exception.InvalidInputException
 import ghidra.util.task.TaskMonitor
-import io.joern.ghidra2cpg.passes._
+import io.joern.ghidra2cpg.passes.*
 import io.joern.ghidra2cpg.passes.arm.ArmFunctionPass
 import io.joern.ghidra2cpg.passes.mips.{LoHiPass, MipsFunctionPass}
 import io.joern.ghidra2cpg.passes.x86.{ReturnEdgesPass, X86FunctionPass}
-import io.shiftleft.codepropertygraph.Cpg
-import io.shiftleft.passes.KeyPoolCreator
-import io.shiftleft.x2cpg.X2Cpg
-import utilities.util.FileUtilities
+import io.joern.ghidra2cpg.utils.{CommandLineConfig, Decompiler, WarnAndUpErrorLogger}
+import io.joern.x2cpg.passes.frontend.{MetaDataPass, TypeNodePass}
+import io.joern.x2cpg.{X2Cpg, X2CpgFrontend}
+import io.shiftleft.semanticcpg.utils.FileUtil.*
+import io.shiftleft.codepropertygraph.generated.Cpg
+import io.shiftleft.codepropertygraph.generated.Languages
+import io.shiftleft.semanticcpg.utils.FileUtil
+import org.apache.logging.log4j.LogManager
 
 import java.io.File
-import scala.collection.mutable
-import scala.collection.mutable.ListBuffer
-import scala.jdk.CollectionConverters._
+import java.util.concurrent.ConcurrentSkipListSet
+import scala.jdk.CollectionConverters.*
+import scala.util.Try
+import scala.util.control.NonFatal
 
-class Ghidra2Cpg() {
+class Ghidra2Cpg extends X2CpgFrontend {
+  override type ConfigType = Config
+  override val defaultConfig: Config = Config()
 
-  /**
-    * Create a CPG representing the given input file. The CPG
-    * is stored at the given output file. The caller must close
+  /** Create a CPG representing the given input file. The CPG is stored at the given output file. The caller must close
     * the CPG.
-    * */
-  def createCpg(inputFile: File, outputFile: Option[String]): Cpg = {
-
+    */
+  override def createCpg(config: Config): Try[Cpg] = {
+    val inputFile = new File(config.inputPath)
     if (!inputFile.isDirectory && !inputFile.isFile) {
-      throw new InvalidInputException(
-        s"$inputFile is not a valid directory or file."
-      )
+      throw new InvalidInputException(s"$inputFile is not a valid directory or file.")
     }
 
-    val cpg = X2Cpg.newEmptyCpg(outputFile)
+    X2Cpg.withNewEmptyCpg(config.outputPath, config) { (cpg, _) =>
+      FileUtil.usingTemporaryDirectory("ghidra2cpg_tmp") { tempWorkingDir =>
+        initGhidra()
+        var program: Program       = null
+        var project: GhidraProject = null;
 
-    better.files.File.usingTemporaryDirectory("ghidra2cpg_tmp") { tempWorkingDir =>
-      initGhidra()
-      val locator = new ProjectLocator(tempWorkingDir.path.toAbsolutePath.toString, CommandLineConfig.projectName)
-      var program: Program = null
-      var project: Project = null
-
-      try {
-        val projectManager = new HeadlessGhidraProjectManager
-        project = projectManager.createProject(locator, null, false)
-        program = AutoImporter.importByUsingBestGuess(
-          inputFile,
-          null,
-          this,
-          new MessageLog,
-          TaskMonitor.DUMMY
-        )
-        addProgramToCpg(program, inputFile.getAbsolutePath, cpg)
-      } catch {
-        case e: Throwable =>
-          e.printStackTrace()
-      } finally {
-        if (program != null) {
-          AutoAnalysisManager.getAnalysisManager(program).dispose()
-          program.release(this)
+        try {
+          // The 'true' parameter indicates this is a temporary project
+          project =
+            GhidraProject.createProject(tempWorkingDir.absolutePathAsString, CommandLineConfig.projectName, true)
+          val loadResults = ProgramLoader
+            .builder()
+            .source(inputFile)
+            .project(project.getProject)
+            .monitor(TaskMonitor.DUMMY)
+            .load()
+          program = loadResults.getPrimaryDomainObject(this)
+          val txId = program.startTransaction("Batch Processing")
+          AutoAnalysisManager.getAnalysisManager(program).initializeOptions()
+          try {
+            addProgramToCpg(program, inputFile.getCanonicalPath, cpg)
+          } finally {
+            program.endTransaction(txId, true)
+            program.release(this)
+          }
+        } catch {
+          case NonFatal(e) =>
+            e.printStackTrace()
+        } finally {
+          // Closing deletes the project (since we created a temporary project)
+          project.close()
         }
-        project.close()
-        FileUtilities.deleteDir(locator.getProjectDir)
-        locator.getMarkerFile.delete
       }
     }
-    cpg
   }
 
   private def initGhidra(): Unit = {
+    // Ghidra's default console logging is very chatty; reduce it to warnings and errors
+    WarnAndUpErrorLogger.install()
+
     // We need this for the URL handler
     Handler.registerHandler()
 
@@ -89,113 +95,75 @@ class Ghidra2Cpg() {
   }
 
   private def addProgramToCpg(program: Program, fileAbsolutePath: String, cpg: Cpg): Unit = {
-    val autoAnalysisManager: AutoAnalysisManager = AutoAnalysisManager.getAnalysisManager(program)
     val transactionId: Int = program.startTransaction("Analysis")
     try {
-      autoAnalysisManager.initializeOptions()
-      autoAnalysisManager.reAnalyzeAll(null)
-      autoAnalysisManager.startAnalysis(TaskMonitor.DUMMY)
-      GhidraProgramUtilities.setAnalyzedFlag(program, true)
+      GhidraProject.analyze(program);
+      GhidraProgramUtilities.markProgramAnalyzed(program)
+      handleProgram(program, fileAbsolutePath, cpg)
     } catch {
-      case e: Throwable =>
+      case NonFatal(e) =>
         e.printStackTrace()
     } finally {
       program.endTransaction(transactionId, true)
     }
-    try {
-      handleProgram(program, fileAbsolutePath, cpg)
-    } catch {
-      case e: Throwable =>
-        e.printStackTrace()
-    }
+
   }
 
   def handleProgram(program: Program, fileAbsolutePath: String, cpg: Cpg): Unit = {
 
     val flatProgramAPI: FlatProgramAPI = new FlatProgramAPI(program)
-    val decompiler = Decompiler(program).get
+    val decompiler                     = Decompiler(program).get
 
     // Functions
-    val listing = program.getListing
+    val listing          = program.getListing
     val functionIterator = listing.getFunctions(true)
-    val functions = functionIterator.iterator.asScala.toList
+    val functions        = functionIterator.iterator.asScala.toList
 
-    val address2Literals: Map[Long, String] = DefinedDataIterator
-      .definedStrings(program)
+    val address2Literals: Map[Long, String] = DefinedStringIterator
+      .forProgram(program)
       .iterator()
       .asScala
       .toList
       .map(x => x.getAddress().getOffset -> x.getValue.toString)
       .toMap
 
-    // We touch every function twice, regular ASM and PCode
-    // Also we have + 2 for MetaDataPass and Namespacepass
-    val numOfKeypools = functions.size * 3 + 2
-    val keyPoolIterator = KeyPoolCreator.obtain(numOfKeypools).iterator
-
-    new MetaDataPass(fileAbsolutePath, cpg, keyPoolIterator.next()).createAndApply()
-    new NamespacePass(cpg, fileAbsolutePath, keyPoolIterator.next()).createAndApply()
+    new MetaDataPass(cpg, Languages.GHIDRA, fileAbsolutePath).createAndApply()
+    Option(flatProgramAPI.getProgramFile).foreach { programFile =>
+      new NamespacePass(cpg, programFile).createAndApply()
+    }
 
     program.getLanguage.getLanguageDescription.getProcessor.toString match {
       case "MIPS" =>
-        functions.foreach { function =>
-          new MipsFunctionPass(
-            program,
-            address2Literals,
-            fileAbsolutePath,
-            function,
-            cpg,
-            keyPoolIterator.next(),
-            decompiler
-          ).createAndApply()
-          new LoHiPass(cpg).createAndApply()
-        }
+        new MipsFunctionPass(program, address2Literals, fileAbsolutePath, functions, cpg, decompiler).createAndApply()
+        new LoHiPass(cpg).createAndApply()
       case "AARCH64" | "ARM" =>
-        functions.foreach { function =>
-          new ArmFunctionPass(
-            program,
-            fileAbsolutePath,
-            function,
-            cpg,
-            keyPoolIterator.next(),
-            decompiler
-          ).createAndApply()
-        }
+        new ArmFunctionPass(program, fileAbsolutePath, functions, cpg, decompiler)
+          .createAndApply()
       case _ =>
-        functions.foreach { function =>
-          new X86FunctionPass(
-            program,
-            fileAbsolutePath,
-            function,
-            cpg,
-            keyPoolIterator.next(),
-            decompiler
-          ).createAndApply()
-          new ReturnEdgesPass(cpg).createAndApply()
-        }
+        new X86FunctionPass(program, fileAbsolutePath, functions, cpg, decompiler)
+          .createAndApply()
+        new ReturnEdgesPass(cpg).createAndApply()
     }
-    new TypesPass(cpg).createAndApply()
-    new JumpPass(cpg, keyPoolIterator.next()).createAndApply()
-    new LiteralPass(cpg, address2Literals, program, flatProgramAPI, keyPoolIterator.next()).createAndApply()
+
+    TypeNodePass.withRegisteredTypes(Types.types.asScala.toSet, cpg).createAndApply()
+    new JumpPass(cpg).createAndApply()
+    new LiteralPass(cpg, flatProgramAPI).createAndApply()
   }
-
-  private class HeadlessProjectConnection(
-      projectManager: HeadlessGhidraProjectManager,
-      connection: GhidraURLConnection
-  ) extends DefaultProject(projectManager, connection) {}
-
-  private class HeadlessGhidraProjectManager extends DefaultProjectManager {}
 }
 
 object Types {
+  private val logger = LogManager.getLogger(getClass)
+
   // Types will be added to the CPG as soon as everything
   // else is done
-  var types: mutable.SortedSet[String] = mutable.SortedSet[String]()
+  // Must be thread-safe: the function passes run in parallel, and concurrent inserts into a plain TreeSet can
+  // corrupt the tree and spin forever.
+  val types: ConcurrentSkipListSet[String]   = new ConcurrentSkipListSet[String]()
   def registerType(typeName: String): String = {
     try {
-      types += typeName
+      types.add(typeName)
     } catch {
-      case e: Exception => println(s" Error adding type: $typeName")
+      case NonFatal(_) => logger.warn(s"Error adding type: $typeName")
     }
     typeName
   }

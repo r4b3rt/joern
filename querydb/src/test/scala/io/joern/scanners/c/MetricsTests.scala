@@ -2,14 +2,13 @@ package io.joern.scanners.c
 
 import io.joern.suites.CQueryTestSuite
 import io.shiftleft.codepropertygraph.generated.nodes
-import io.joern.console.scan._
+import io.joern.console.scan.*
+import io.shiftleft.semanticcpg.language.*
 
-class MetricsTests extends CQueryTestSuite {
-
-  override def queryBundle = Metrics
+class MetricsTests extends CQueryTestSuite(Metrics) {
 
   "find functions with too many parameters" in {
-    queryBundle.tooManyParameters(4)(cpg).map(_.evidence) match {
+    queryBundle.tooManyParameters()(cpg).map(_.evidence) match {
       case List(IndexedSeq(method: nodes.Method)) =>
         method.name shouldBe "too_many_params"
       case _ => fail()
@@ -17,7 +16,7 @@ class MetricsTests extends CQueryTestSuite {
   }
 
   "find functions with high cyclomatic complexity" in {
-    queryBundle.tooHighComplexity(4)(cpg).map(_.evidence) match {
+    queryBundle.tooHighComplexity()(cpg).map(_.evidence) match {
       case List(IndexedSeq(method: nodes.Method)) =>
         method.name shouldBe "high_cyclomatic_complexity"
       case _ => fail()

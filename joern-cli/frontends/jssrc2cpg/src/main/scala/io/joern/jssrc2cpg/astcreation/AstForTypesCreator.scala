@@ -1,0 +1,1289 @@
+package io.joern.jssrc2cpg.astcreation
+
+import io.joern.jssrc2cpg.parser.BabelNodeSyntax.*
+import io.joern.jssrc2cpg.passes.EcmaBuiltins
+import io.joern.x2cpg.{Ast, ValidationMode}
+import io.joern.x2cpg.datastructures.Stack.*
+import io.joern.x2cpg.datastructures.VariableScopeManager
+import io.joern.x2cpg.frontendspecific.jssrc2cpg.Defines
+import io.shiftleft.codepropertygraph.generated.nodes.{
+  NewBlock,
+  NewCall,
+  NewIdentifier,
+  NewMethod,
+  NewModifier,
+  NewNamespaceBlock,
+  NewNode,
+  NewTypeDecl
+}
+import io.shiftleft.codepropertygraph.generated.{
+  DispatchTypes,
+  EdgeTypes,
+  EvaluationStrategies,
+  ModifierTypes,
+  Operators,
+  PropertyDefaults,
+  PropertyNames
+}
+
+trait AstForTypesCreator(implicit withSchemaValidation: ValidationMode) { this: AstCreator =>
+
+  protected def astForTypeAlias(
+    alias: DeclareTypeAlias | TypeAlias | TSTypeAliasDeclaration | ObjectPattern | TSTypeLiteral
+  ): Ast = {
+    val (aliasName, aliasFullName) = calcTypeNameAndFullName(alias)
+    registerType(aliasFullName)
+
+    val nameNode: BabelNode = alias match {
+      case a: DeclareTypeAlias => a.right
+      case a: TypeAlias        => a.right
+      case other               => other
+    }
+    val nameTpe = typeFor(nameNode)
+    val name    = if (nameTpe.contains("{") || nameTpe.contains("(")) {
+      calcTypeNameAndFullName(nameNode)._1
+    } else nameTpe
+
+    val astParentType     = methodAstParentStack.head.label
+    val astParentFullName = methodAstParentStack.head.properties(PropertyNames.FullName).toString
+
+    val aliasTypeDeclNode =
+      typeDeclNode(alias, aliasName, aliasFullName, parserResult.filename, alias.code, astParentType, astParentFullName)
+    seenAliasTypes.update(aliasTypeDeclNode.name, aliasTypeDeclNode)
+
+    if (!Defines.JsTypes.contains(name) && !seenAliasTypes.contains(name)) {
+      val (typeName, typeFullName) = calcTypeNameAndFullName(alias, Option(name))
+      registerType(typeFullName)
+
+      val typeDeclNode_ = typeDeclNode(
+        alias,
+        typeName,
+        typeFullName,
+        parserResult.filename,
+        alias.code,
+        astParentType,
+        astParentFullName,
+        alias = Option(aliasFullName)
+      )
+      diffGraph.addEdge(methodAstParentStack.head, typeDeclNode_, EdgeTypes.AST)
+    } else {
+      seenAliasTypes.get(name).foreach(_.aliasTypeFullName(aliasFullName))
+    }
+
+    // adding all class methods / functions and uninitialized, non-static members
+    val members: Seq[BabelNode] = alias match {
+      case literal: TSTypeLiteral     => literal.members
+      case pattern: ObjectPattern     => pattern.properties
+      case ts: TSTypeAliasDeclaration =>
+        ts.typeAnnotation match {
+          case literal: TSTypeLiteral => literal.members
+          case _                      => Seq.empty
+        }
+      case _: (DeclareTypeAlias | TypeAlias) => Seq.empty
+    }
+    members
+      .filter(member => isClassMethodOrUninitializedMemberOrObjectProperty(member) && !isStaticMember(member))
+      .map(member => astForClassMember(member, aliasTypeDeclNode, ignoreInitCalls = true))
+    Ast(aliasTypeDeclNode)
+  }
+
+  private def kindOf(node: BabelNode): Option[String] = node match {
+    case n: ClassMethod         => Some(n.kind)
+    case n: ClassPrivateMethod  => Some(n.kind)
+    case n: ObjectMethod        => Some(n.kind)
+    case n: TSDeclareMethod     => Some(n.kind)
+    case n: TSMethodSignature   => Some(n.kind)
+    case n: TSPropertySignature => n.kind
+    case _                      => None
+  }
+
+  private def isConstructor(node: BabelNode): Boolean = node match {
+    case _: TSConstructSignatureDeclaration => true
+    case _                                  => kindOf(node).contains("constructor")
+  }
+
+  private def staticOf(node: BabelNode): Boolean = node match {
+    case n: ClassAccessorProperty => n.static
+    case n: ClassMethod           => n.static
+    case n: ClassPrivateMethod    => n.static
+    case n: ClassPrivateProperty  => n.static
+    case n: ClassProperty         => n.static
+    case n: TSDeclareMethod       => n.static
+    case n: TSIndexSignature      => n.static.contains(true)
+    case _                        => false
+  }
+
+  private def abstractOf(node: BabelNode): Boolean = node match {
+    case n: ClassAccessorProperty => n.`abstract`.contains(true)
+    case n: ClassDeclaration      => n.`abstract`.contains(true)
+    case n: ClassMethod           => n.`abstract`.contains(true)
+    case n: ClassPrivateMethod    => n.`abstract`.contains(true)
+    case n: ClassProperty         => n.`abstract`.contains(true)
+    case n: TSDeclareMethod       => n.`abstract`.contains(true)
+    case _                        => false
+  }
+
+  private def readonlyOf(node: BabelNode): Boolean = node match {
+    case n: ClassAccessorProperty => n.readonly.contains(true)
+    case n: ClassPrivateProperty  => n.readonly.contains(true)
+    case n: ClassProperty         => n.readonly.contains(true)
+    case n: TSIndexSignature      => n.readonly.contains(true)
+    case n: TSParameterProperty   => n.readonly.contains(true)
+    case n: TSPropertySignature   => n.readonly.contains(true)
+    case _                        => false
+  }
+
+  private def accessibilityOf(node: BabelNode): Option[String] = node match {
+    case n: ClassAccessorProperty => n.accessibility
+    case n: ClassMethod           => n.accessibility
+    case n: ClassPrivateMethod    => n.accessibility
+    case n: ClassProperty         => n.accessibility
+    case n: TSDeclareMethod       => n.accessibility
+    case n: TSParameterProperty   => n.accessibility
+    case _                        => None
+  }
+
+  /** The key and the value of a member that is initialized with a value, e.g. `a = 1` in a class body. */
+  private def keyAndValueOf(node: BabelNode): Option[(BabelNode, BabelNode)] = node match {
+    case n: ClassProperty         => n.value.map(n.key -> _)
+    case n: ClassPrivateProperty  => n.value.map(n.key -> _)
+    case n: ClassAccessorProperty => n.value.map(n.key -> _)
+    case n: ObjectProperty        => Some(n.key -> n.value)
+    case _                        => None
+  }
+
+  /** The members declared in the body of a class or an interface. */
+  private def declaredMembersOf(node: BabelNode): Seq[BabelNode] = node match {
+    case n: ClassDeclaration       => n.body.body
+    case n: ClassExpression        => n.body.body
+    case n: TSInterfaceDeclaration => n.body.body
+    case _                         => Seq.empty
+  }
+
+  /** The decomposed body of a class: its parameter properties, all declared members, the members declared dynamically
+    * in the constructor body, and the constructor itself (if present).
+    */
+  private case class ClassMembers(
+    parameterProperties: Seq[BabelNode],
+    allMembers: Seq[BabelNode],
+    dynamicallyDeclaredMembers: Seq[BabelNode],
+    constructor: Option[FunctionNode]
+  ) {
+    def members(withConstructor: Boolean): Seq[BabelNode] =
+      if (withConstructor) {
+        parameterProperties ++ allMembers ++ dynamicallyDeclaredMembers
+      } else {
+        parameterProperties ++ allMembers.diff(constructor.toSeq) ++ dynamicallyDeclaredMembers
+      }
+  }
+
+  private def decomposeClassMembers(clazz: BabelNode): ClassMembers = {
+    val allMembers      = declaredMembersOf(clazz)
+    val constructor     = allMembers.collectFirst { case f: FunctionNode if isConstructor(f) => f }
+    val constructorBody = constructor.toSeq.flatMap {
+      case c: ClassMethod        => c.body.body
+      case c: ClassPrivateMethod => c.body.body
+      case _                     => Seq.empty
+    }
+    val constructorParameters = constructor.toSeq.flatMap {
+      case c: ClassMethod        => c.params
+      case c: ClassPrivateMethod => c.params
+      case c: TSDeclareMethod    => c.params
+      case _                     => Seq.empty
+    }
+    val dynamicallyDeclaredMembers = constructorBody.filter(isInitializedMember)
+    val parameterProperties        = constructorParameters.filter(isParameterProperty)
+    ClassMembers(parameterProperties, allMembers, dynamicallyDeclaredMembers, constructor)
+  }
+
+  private def classMembers(clazz: BabelNode, withConstructor: Boolean = true): Seq[BabelNode] =
+    decomposeClassMembers(clazz).members(withConstructor)
+
+  private def createFakeConstructor(
+    code: String,
+    forElem: BabelNode,
+    methodBlockContent: ConstructorContent
+  ): MethodAst = {
+    val fakeStart = ujson.Num(forElem.start.getOrElse(-1))
+    val fakeEnd   = ujson.Num(forElem.end.getOrElse(-1))
+    // the constructor is located where the class is
+    val fakeLoc         = forElem.json.objOpt.flatMap(_.get("loc")).filter(_ != ujson.Null).toList.map("loc" -> _)
+    val fakeConstructor = ClassMethod(
+      ujson.Obj.from(
+        List(
+          "type"  -> ujson.Str("ClassMethod"),
+          "start" -> fakeStart,
+          "end"   -> fakeEnd,
+          "key"   -> ujson.Obj.from(
+            List(
+              "type"  -> ujson.Str("Identifier"),
+              "name"  -> ujson.Str("constructor"),
+              "start" -> fakeStart,
+              "end"   -> fakeEnd
+            ) ++ fakeLoc
+          ),
+          "kind"      -> ujson.Str("constructor"),
+          "static"    -> ujson.False,
+          "computed"  -> ujson.False,
+          "generator" -> ujson.False,
+          "async"     -> ujson.False,
+          "id"        -> ujson.Null,
+          "params"    -> ujson.Arr(),
+          "body"      -> ujson.Obj("type" -> "BlockStatement", "body" -> ujson.Arr(), "directives" -> ujson.Arr())
+        ) ++ fakeLoc
+      )
+    )
+    val result = createMethodAstAndNode(fakeConstructor, false, false, methodBlockContent)
+    result.methodNode.code(code)
+    result
+  }
+
+  private def findClassConstructor(clazz: BabelNode): Option[FunctionNode] =
+    decomposeClassMembers(clazz).constructor
+
+  protected case class ConstructorContent(
+    clazz: Option[BabelNode],
+    constructorContent: List[BabelNode],
+    typeDecl: Option[NewTypeDecl]
+  )
+  protected object ConstructorContent {
+    def empty: ConstructorContent = ConstructorContent(None, List.empty, None)
+  }
+
+  private def createClassConstructor(
+    classExpr: BabelNode,
+    classConstructorNode: Option[FunctionNode],
+    constructorContent: ConstructorContent
+  ): MethodAst =
+    classConstructorNode match {
+      case Some(classConstructor: FunctionWithBody) =>
+        val result = createMethodAstAndNode(classConstructor, false, false, constructorContent)
+        diffGraph.addEdge(result.methodNode, NewModifier().modifierType(ModifierTypes.CONSTRUCTOR), EdgeTypes.AST)
+        result
+      case Some(classConstructor) =>
+        val methodNode = createMethodDefinitionNode(classConstructor, constructorContent)
+        diffGraph.addEdge(methodNode, NewModifier().modifierType(ModifierTypes.CONSTRUCTOR), EdgeTypes.AST)
+        MethodAst(Ast(methodNode), methodNode, Ast(methodNode))
+      case _ =>
+        val result = createFakeConstructor("constructor() {}", classExpr, constructorContent)
+        diffGraph.addEdge(result.methodNode, NewModifier().modifierType(ModifierTypes.CONSTRUCTOR), EdgeTypes.AST)
+        result
+    }
+
+  private def interfaceConstructor(typeName: String, tsInterface: TSInterfaceDeclaration): NewMethod =
+    findClassConstructor(tsInterface) match {
+      case Some(interfaceConstructor) =>
+        createMethodDefinitionNode(interfaceConstructor, ConstructorContent.empty)
+      case _ => createFakeConstructor(s"new: $typeName", tsInterface, ConstructorContent.empty).methodNode
+    }
+
+  /** The class or enum a static member belongs to. Its type is the base of the member's access, e.g. `ClassA` in
+    * `ClassA.b = 2`.
+    */
+  protected case class MemberOwner(name: String, typeFullName: String)
+
+  private def thisAst(node: BabelNode): Ast = {
+    val thisNode = identifierNode(node, "this").dynamicTypeHintFullName(typeHintForThisExpression())
+    scope.addVariableReference(thisNode.name, thisNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+    Ast(thisNode)
+  }
+
+  /** The access of the member `key` of `base`: `base.key`, or `base[key]` for keys that are no plain names. */
+  private def memberAccessAst(base: Ast, key: BabelNode, isComputed: Boolean, node: BabelNode): Ast = key match {
+    case id: Identifier if !isComputed =>
+      createFieldAccessCallAst(base, fieldIdentifierNode(id, id.name, id.name), node.lineNumber, node.columnNumber)
+    case privateName: PrivateName =>
+      val name = privateName.code
+      createFieldAccessCallAst(base, fieldIdentifierNode(privateName, name, name), node.lineNumber, node.columnNumber)
+    case _ =>
+      createIndexAccessCallAst(base, astForNode(key), node.lineNumber, node.columnNumber)
+  }
+
+  /** The base of the access of a member: `this` for instance members, the type of the owner for static members. */
+  private def memberBaseAst(node: BabelNode, isStatic: Boolean, owner: Option[MemberOwner]): Ast =
+    owner.filter(_ => isStatic) match {
+      case Some(MemberOwner(name, typeFullName)) => Ast(typeRefNode(node, name, typeFullName))
+      case None                                  => thisAst(node)
+    }
+
+  private def astsForEnumMember(tsEnumMember: TSEnumMember, owner: MemberOwner): Seq[Ast] = {
+    val name          = tsEnumMember.id.code
+    val tpe           = typeFor(tsEnumMember)
+    val possibleTypes = Seq(tpe)
+    val typeFullName  = if (Defines.isBuiltinType(tpe)) tpe else Defines.Any
+    val memberNode_   = memberNode(tsEnumMember, name, tsEnumMember.code, typeFullName).possibleTypes(possibleTypes)
+    addModifier(memberNode_, tsEnumMember)
+
+    tsEnumMember.initializer match {
+      case Some(initializer) =>
+        val lhsAst =
+          memberAccessAst(memberBaseAst(tsEnumMember, true, Some(owner)), tsEnumMember.id, false, tsEnumMember)
+        val rhsAst    = astForNodeWithFunctionReference(initializer)
+        val callNode_ =
+          callNode(tsEnumMember, tsEnumMember.code, Operators.assignment, DispatchTypes.STATIC_DISPATCH)
+        val argAsts = List(lhsAst, rhsAst)
+        Seq(callAst(callNode_, argAsts), Ast(memberNode_))
+      case None =>
+        Seq(Ast(memberNode_))
+    }
+  }
+
+  /** The identifier a property is keyed by, if any. */
+  private def keyIdentifierOf(node: BabelNode): Option[Identifier] = node match {
+    case n: TSPropertySignature => Some(n.key).collect { case id: Identifier => id }
+    case n: ObjectProperty      => Some(n.key).collect { case id: Identifier => id }
+    case _                      => None
+  }
+
+  private def storeDecorators(node: BabelNode, memberNode_ : NewNode): Unit =
+    astsForDecorators(node).foreach { decoratorAst =>
+      Ast.storeInDiffGraph(decoratorAst, diffGraph)
+      decoratorAst.root.foreach(diffGraph.addEdge(memberNode_, _, EdgeTypes.AST))
+    }
+
+  protected def astForClassMember(
+    classElement: BabelNode,
+    typeDeclNode: NewTypeDecl,
+    ignoreInitCalls: Boolean = false,
+    staticOwner: Option[MemberOwner] = None
+  ): Ast = {
+    val tpe           = typeFor(classElement)
+    val possibleTypes = Seq(tpe)
+    val typeFullName  = if (Defines.isBuiltinType(tpe)) tpe else Defines.Any
+    val memberNode_   = classElement match {
+      case function: (TSDeclareMethod | TSDeclareFunction) =>
+        val functionNode = createMethodDefinitionNode(function, ConstructorContent.empty)
+        addModifier(functionNode, function)
+        memberNode(function, functionNode.name, function.code, typeFullName, Seq(functionNode.fullName))
+          .possibleTypes(possibleTypes)
+      case method: (ClassMethod | ClassPrivateMethod) =>
+        val functionNode = createMethodAstAndNode(method, false, false, ConstructorContent.empty).methodNode
+        addModifier(functionNode, method)
+        memberNode(method, functionNode.name, method.code, typeFullName, Seq(functionNode.fullName))
+          .possibleTypes(possibleTypes)
+      case statement: ExpressionStatement if isInitializedMember(statement) =>
+        val name = statement.expression match {
+          case assignment: AssignmentExpression =>
+            assignment.left match {
+              case member: MemberExpression => member.property.code
+              case other                    => other.code
+            }
+          case other => other.code
+        }
+        memberNode(statement, name, statement.code, typeFullName).possibleTypes(possibleTypes)
+      case _ if keyIdentifierOf(classElement).isDefined =>
+        val name        = keyIdentifierOf(classElement).get.name
+        val memberNode_ = memberNode(classElement, name, classElement.code, typeFullName).possibleTypes(possibleTypes)
+        storeDecorators(classElement, memberNode_)
+        memberNode_
+      case _ =>
+        val name = classElement match {
+          // The name of a private field includes the hash: `#a` is not the same member as `a`
+          case property: ClassProperty         => property.key.code
+          case property: ClassAccessorProperty => property.key.code
+          case property: ClassPrivateProperty  => property.key.code
+          case property: TSParameterProperty   =>
+            property.parameter match {
+              case assignment: AssignmentPattern => assignment.left.code
+              case identifier: Identifier        => identifier.name
+            }
+          // TODO: name field most likely needs adjustment for other Babel AST types
+          case _ => classElement.code
+        }
+        val memberNode_ = memberNode(classElement, name, classElement.code, typeFullName).possibleTypes(possibleTypes)
+        storeDecorators(classElement, memberNode_)
+        memberNode_
+    }
+
+    addModifier(memberNode_, classElement)
+    diffGraph.addEdge(typeDeclNode, memberNode_, EdgeTypes.AST)
+
+    if (!ignoreInitCalls) {
+      keyAndValueOf(classElement) match {
+        case Some((key, value)) =>
+          val lhsAst = classElement match {
+            case _: (ClassProperty | ClassPrivateProperty | ClassAccessorProperty) =>
+              val isComputed = classElement match {
+                case n: ClassProperty         => n.computed
+                case n: ClassAccessorProperty => n.computed
+                case _                        => false
+              }
+              memberAccessAst(
+                memberBaseAst(classElement, staticOf(classElement), staticOwner),
+                key,
+                isComputed,
+                classElement
+              )
+            case _ => astForNode(key)
+          }
+          val rhsAst    = astForNodeWithFunctionReference(value)
+          val callNode_ =
+            callNode(classElement, classElement.code, Operators.assignment, DispatchTypes.STATIC_DISPATCH)
+          val argAsts = List(lhsAst, rhsAst)
+          return callAst(callNode_, argAsts)
+        case None =>
+      }
+    }
+
+    if (!ignoreInitCalls && classElement.isInstanceOf[TSParameterProperty]) {
+      val name       = memberNode_.name
+      val memberNode = fieldIdentifierNode(classElement, name, name)
+      val thisNode   = identifierNode(classElement, "this")
+      scope.addVariableReference(thisNode.name, thisNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+      val fieldAccessAst =
+        createFieldAccessCallAst(thisNode, memberNode, classElement.lineNumber, classElement.columnNumber)
+      val rhsAst    = Ast(identifierNode(classElement, name, name, tpe).possibleTypes(possibleTypes))
+      val callNode_ =
+        callNode(classElement, s"this.$name = $name", Operators.assignment, DispatchTypes.STATIC_DISPATCH)
+      val argAsts = List(fieldAccessAst, rhsAst)
+      return callAst(callNode_, argAsts)
+    }
+
+    Ast()
+  }
+
+  protected def astForEnum(tsEnum: TSEnumDeclaration): Ast = {
+    val (typeName, typeFullName) = calcTypeNameAndFullName(tsEnum)
+    registerType(typeFullName)
+
+    val astParentType     = methodAstParentStack.head.label
+    val astParentFullName = methodAstParentStack.head.properties(PropertyNames.FullName).toString
+
+    val typeDeclNode_ = typeDeclNode(
+      tsEnum,
+      typeName,
+      typeFullName,
+      parserResult.filename,
+      s"enum $typeName",
+      astParentType,
+      astParentFullName
+    )
+    seenAliasTypes.update(typeDeclNode_.name, typeDeclNode_)
+
+    addModifier(typeDeclNode_, tsEnum)
+
+    val typeRefNode_ = typeRefNode(tsEnum, s"enum $typeName", typeFullName)
+
+    methodAstParentStack.push(typeDeclNode_)
+    dynamicInstanceTypeStack.push(typeFullName)
+    typeRefIdStack.push(typeRefNode_)
+    scope.pushNewMethodScope(typeFullName, typeName, typeDeclNode_, None)
+
+    val (enumMembersWithInitializer, enumMembersPlain) = tsEnum.body.members.toList.partition(_.initializer.isDefined)
+
+    val enumOwner  = MemberOwner(typeName, typeFullName)
+    val memberAsts = enumMembersPlain.flatMap(astsForEnumMember(_, enumOwner))
+
+    if (enumMembersWithInitializer.isEmpty) {
+      Ast.storeInDiffGraph(Ast(typeDeclNode_).withChildren(memberAsts), diffGraph)
+    } else {
+      val init = staticEnumInitMethodAst(
+        tsEnum,
+        typeDeclNode_,
+        enumMembersWithInitializer,
+        s"$typeFullName:${io.joern.x2cpg.Defines.StaticInitMethodName}",
+        Defines.Any,
+        enumOwner
+      )
+      Ast.storeInDiffGraph(Ast(typeDeclNode_).withChildren(memberAsts).withChild(init), diffGraph)
+    }
+
+    methodAstParentStack.pop()
+    dynamicInstanceTypeStack.pop()
+    typeRefIdStack.pop()
+    scope.popScope()
+
+    diffGraph.addEdge(methodAstParentStack.head, typeDeclNode_, EdgeTypes.AST)
+    Ast(typeRefNode_)
+  }
+
+  private def isStaticMember(node: BabelNode): Boolean = {
+    val isMethod = node.isInstanceOf[ClassMethod] || node.isInstanceOf[ClassPrivateMethod]
+    !isMethod && staticOf(node)
+  }
+
+  /** Static methods live on the class constructor function and not on its instances. */
+  private def isStaticMethod(node: BabelNode): Boolean = node match {
+    case _: (ClassMethod | ClassPrivateMethod | TSDeclareMethod) => staticOf(node)
+    case _                                                       => false
+  }
+
+  private def isInitializedMember(node: BabelNode): Boolean = {
+    val isAssignment = node match {
+      case statement: ExpressionStatement =>
+        statement.expression match {
+          case assignment: AssignmentExpression =>
+            assignment.left match {
+              case member: MemberExpression => member.`object`.code == "this"
+              case _                        => false
+            }
+          case _ => false
+        }
+      case _ => false
+    }
+    keyAndValueOf(node).isDefined || isAssignment
+  }
+
+  private def isParameterProperty(node: BabelNode): Boolean = node.isInstanceOf[TSParameterProperty]
+
+  private def isStaticInitBlock(node: BabelNode): Boolean = node.isInstanceOf[StaticBlock]
+
+  private def isClassMethodOrUninitializedMember(node: BabelNode): Boolean =
+    !node.isInstanceOf[StaticBlock] &&
+      (node.isInstanceOf[ClassMethod] || node.isInstanceOf[ClassPrivateMethod] || !isInitializedMember(node))
+
+  private def isClassMethodOrUninitializedMemberOrObjectProperty(node: BabelNode): Boolean =
+    !node.isInstanceOf[StaticBlock] &&
+      (node.isInstanceOf[ObjectProperty] || node.isInstanceOf[ClassMethod] || node.isInstanceOf[ClassPrivateMethod] ||
+        !isInitializedMember(node))
+
+  private def staticClassInitMethodAst(
+    node: BabelNode,
+    typeDeclNode: NewTypeDecl,
+    staticMemberInits: List[BabelNode],
+    staticMemberBlocks: List[BabelNode],
+    fullName: String,
+    returnType: String,
+    owner: MemberOwner
+  ): Ast = {
+    val modifiers =
+      List(NewModifier().modifierType(ModifierTypes.STATIC), NewModifier().modifierType(ModifierTypes.CONSTRUCTOR))
+    val blockNode   = NewBlock().typeFullName(Defines.Any)
+    val methodNode_ = methodNode(node, io.joern.x2cpg.Defines.StaticInitMethodName, fullName, "", parserResult.filename)
+
+    methodAstParentStack.push(methodNode_)
+    scope.pushNewMethodScope(
+      fullName,
+      io.joern.x2cpg.Defines.StaticInitMethodName,
+      blockNode,
+      typeRefIdStack.headOption
+    )
+    localAstParentStack.push(blockNode)
+
+    val initAsts = staticMemberInits.map(
+      astForClassMember(_, typeDeclNode, staticOwner = Some(owner))
+    ) ++ staticMemberBlocks.map(astForNodeWithFunctionReference)
+
+    methodAstParentStack.pop()
+    localAstParentStack.pop()
+    scope.popScope()
+
+    val methodReturn = methodReturnNode(node, returnType)
+    methodAst(methodNode_, Nil, Ast(blockNode).withChildren(initAsts), methodReturn, modifiers)
+  }
+
+  private def staticEnumInitMethodAst(
+    node: BabelNode,
+    typeDeclNode: NewTypeDecl,
+    enumMembersWithInitializer: List[TSEnumMember],
+    fullName: String,
+    returnType: String,
+    owner: MemberOwner
+  ): Ast = {
+    val modifiers =
+      List(NewModifier().modifierType(ModifierTypes.STATIC), NewModifier().modifierType(ModifierTypes.CONSTRUCTOR))
+    val blockNode   = NewBlock().typeFullName(Defines.Any)
+    val methodNode_ = methodNode(node, io.joern.x2cpg.Defines.StaticInitMethodName, fullName, "", parserResult.filename)
+
+    methodAstParentStack.push(methodNode_)
+    scope.pushNewMethodScope(
+      fullName,
+      io.joern.x2cpg.Defines.StaticInitMethodName,
+      blockNode,
+      typeRefIdStack.headOption
+    )
+    localAstParentStack.push(blockNode)
+
+    val initAsts         = enumMembersWithInitializer.flatMap(astsForEnumMember(_, owner))
+    val (calls, members) = initAsts.partition(_.nodes.headOption.exists(_.isInstanceOf[NewCall]))
+
+    members.foreach(m => diffGraph.addEdge(typeDeclNode, m.root.get, EdgeTypes.AST))
+
+    methodAstParentStack.pop()
+    localAstParentStack.pop()
+    scope.popScope()
+
+    val methodReturn = methodReturnNode(node, returnType)
+    methodAst(methodNode_, Nil, Ast(blockNode).withChildren(calls), methodReturn, modifiers)
+  }
+
+  protected def astForClass(
+    clazz: ClassDeclaration | ClassExpression | DeclareClass,
+    shouldCreateAssignmentCall: Boolean = false
+  ): Ast = {
+    val (typeName, typeFullName) = calcTypeNameAndFullName(clazz)
+    registerType(typeFullName)
+
+    val astParentType     = methodAstParentStack.head.label
+    val astParentFullName = methodAstParentStack.head.properties(PropertyNames.FullName).toString
+
+    val (superClass, implements, mixins) = clazz match {
+      case c: ClassDeclaration => (c.superClass.map(_.code).toSeq, c.implements.map(_.code), c.mixins.toSeq.map(_.code))
+      case c: ClassExpression  => (c.superClass.map(_.code).toSeq, c.implements.map(_.code), c.mixins.toSeq.map(_.code))
+      case c: DeclareClass     => (Seq.empty[String], c.implements.map(_.code), c.mixins.map(_.code))
+    }
+
+    val typeDeclNode_ = typeDeclNode(
+      clazz,
+      typeName,
+      typeFullName,
+      parserResult.filename,
+      s"class $typeName",
+      astParentType,
+      astParentFullName,
+      inherits = superClass ++ implements ++ mixins
+    )
+    seenAliasTypes.update(typeDeclNode_.name, typeDeclNode_)
+
+    addModifier(typeDeclNode_, clazz)
+    astsForDecorators(clazz).foreach { decoratorAst =>
+      Ast.storeInDiffGraph(decoratorAst, diffGraph)
+      decoratorAst.root.foreach(diffGraph.addEdge(typeDeclNode_, _, EdgeTypes.AST))
+    }
+
+    diffGraph.addEdge(methodAstParentStack.head, typeDeclNode_, EdgeTypes.AST)
+
+    val typeRefNode_ = typeRefNode(clazz, s"class $typeName", typeFullName)
+
+    methodAstParentStack.push(typeDeclNode_)
+    dynamicInstanceTypeStack.push(typeFullName)
+    typeRefIdStack.push(typeRefNode_)
+
+    scope.pushNewMethodScope(typeFullName, typeName, typeDeclNode_, None)
+
+    // Decompose the class body once and reuse it for both the member sequence and the located constructor below.
+    val decomposedMembers = decomposeClassMembers(clazz)
+    val allClassMembers   = decomposedMembers.members(withConstructor = false).toList
+
+    // adding all other members and retrieving their initialization calls
+    val memberInitCalls =
+      allClassMembers.filter(m => !isStaticMember(m) && (isInitializedMember(m) || isParameterProperty(m)))
+
+    val constructor =
+      createClassConstructor(
+        clazz,
+        decomposedMembers.constructor,
+        ConstructorContent(Some(clazz), memberInitCalls, Some(typeDeclNode_))
+      )
+    val constructorNode = constructor.methodNode
+
+    // static members live on the constructor function and not on the instances of the class
+    val constructorTypeDecl = functionTypeDecls.getOrElse(constructorNode.fullName, typeDeclNode_)
+
+    // adding all class methods / functions and uninitialized, non-static members
+    allClassMembers
+      .filter(m => isClassMethodOrUninitializedMember(m) && !isStaticMember(m) && !isParameterProperty(m))
+      .foreach { member =>
+        astForClassMember(member, if (isStaticMethod(member)) constructorTypeDecl else typeDeclNode_)
+      }
+
+    // adding all static members and retrieving their initialization calls
+    val staticMemberInits = allClassMembers.filter(isStaticMember)
+
+    // retrieving initialization calls from the static initialization block if any
+    val staticInitBlocks =
+      allClassMembers.collectFirst { case block: StaticBlock => block.body.toList }.getOrElse(List.empty)
+
+    if (staticMemberInits.nonEmpty || staticInitBlocks.nonEmpty) {
+      val init = staticClassInitMethodAst(
+        clazz,
+        constructorTypeDecl,
+        staticMemberInits,
+        staticInitBlocks,
+        s"${constructorNode.fullName}:${io.joern.x2cpg.Defines.StaticInitMethodName}",
+        Defines.Any,
+        MemberOwner(typeName, constructorNode.fullName)
+      )
+      Ast.storeInDiffGraph(init, diffGraph)
+      // the static initializer belongs to the constructor function, just like the static members it initializes
+      diffGraph.addEdge(constructorTypeDecl, init.nodes.head, EdgeTypes.AST)
+    }
+
+    methodAstParentStack.pop()
+    dynamicInstanceTypeStack.pop()
+    typeRefIdStack.pop()
+    scope.popScope()
+
+    // a class evaluates to its constructor function and not to an instance of the class
+    typeRefNode_.typeFullName(constructorNode.fullName)
+
+    if (shouldCreateAssignmentCall) {
+      // return a synthetic assignment to enable tracing of the implicitly created identifier for
+      // the class definition assigned to its constructor
+      val classIdNode = identifierNode(clazz, typeName, typeName, Defines.Any, Seq(constructorNode.fullName))
+
+      val idLocal = localNode(clazz, typeName, typeName, Defines.Any).order(0)
+      diffGraph.addEdge(localAstParentStack.head, idLocal, EdgeTypes.AST)
+      scope.addVariable(typeName, idLocal, Defines.Any, VariableScopeManager.ScopeType.BlockScope)
+      scope.addVariableReference(typeName, classIdNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+
+      val assignmentAst = createAssignmentCallAst(
+        classIdNode,
+        typeRefNode_,
+        s"$typeName = ${constructorNode.fullName}",
+        clazz.lineNumber,
+        clazz.columnNumber
+      )
+
+      val membersWithConstructor = decomposedMembers.members(withConstructor = true)
+      val classDecorationAst     = createClassDecorationAst(clazz, classIdNode)
+      val propertyDecorationAsts =
+        createPropertyDecorationAsts(membersWithConstructor, classNodeInfo = clazz, classIdNode)
+      val methodDecorationAsts = createMethodDecorationAsts(membersWithConstructor, classNodeInfo = clazz, classIdNode)
+      if (classDecorationAst.root.isDefined || propertyDecorationAsts.nonEmpty || methodDecorationAsts.nonEmpty) {
+        val blockNode_   = blockNode(clazz)
+        val childrenAsts =
+          List(assignmentAst, classDecorationAst) ++ propertyDecorationAsts ++ methodDecorationAsts
+        Ast(blockNode_).withChildren(childrenAsts)
+      } else {
+        val blockNode_ = blockNode(clazz)
+        Ast(blockNode_).withChildren(List(assignmentAst))
+      }
+    } else {
+      Ast(typeRefNode_)
+    }
+  }
+
+  private def createClassDecorationAst(classNodeInfo: BabelNode, classIdNode: NewIdentifier): Ast = {
+    val decoratorAsts = decoratorExpressionElements(classNodeInfo).map(astForNodeWithFunctionReference)
+    if (decoratorAsts.nonEmpty) {
+      val lhsAst = Ast(
+        identifierNode(
+          classNodeInfo,
+          classIdNode.name,
+          classIdNode.code,
+          Defines.Any,
+          classIdNode.dynamicTypeHintFullName
+        )
+      )
+
+      val receiverNode = identifierNode(classNodeInfo, "__decorate")
+      scope.addVariableReference(receiverNode.name, receiverNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+      val thisNode = identifierNode(classNodeInfo, "this").dynamicTypeHintFullName(rootTypeDecl.map(_.fullName).toSeq)
+      scope.addVariableReference(thisNode.name, thisNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+
+      val decorateCallNode =
+        callNode(
+          classNodeInfo,
+          s"__decorate([${decoratorAsts.flatMap(_.root.map(codeOf)).mkString(",")}], ${classIdNode.name})",
+          "__decorate",
+          DispatchTypes.DYNAMIC_DISPATCH
+        )
+
+      val classRefNode = Ast(
+        identifierNode(
+          classNodeInfo,
+          classIdNode.name,
+          classIdNode.code,
+          Defines.Any,
+          classIdNode.dynamicTypeHintFullName
+        )
+      )
+      val annotationExprAst = astForDecorateArray(classNodeInfo, decoratorAsts)
+      val args              = Seq(annotationExprAst, classRefNode)
+      val decorateCallAst   =
+        callAst(decorateCallNode, args, receiver = Option(Ast(receiverNode)), base = Option(Ast(thisNode)))
+
+      createAssignmentCallAst(
+        lhsAst,
+        decorateCallAst,
+        s"${classIdNode.name} = ${codeOf(decorateCallAst.nodes.head)}",
+        classNodeInfo.lineNumber,
+        classNodeInfo.columnNumber
+      )
+    } else Ast()
+  }
+
+  private def createMetadataCallTypeAst(tsMethodNodeInfo: BabelNode): Ast = {
+    val metadataCallRecNode = identifierNode(tsMethodNodeInfo, "__metadata")
+    scope.addVariableReference(
+      metadataCallRecNode.name,
+      metadataCallRecNode,
+      Defines.Any,
+      EvaluationStrategies.BY_REFERENCE
+    )
+    val metadataCallRecThisNode =
+      identifierNode(tsMethodNodeInfo, "this").dynamicTypeHintFullName(rootTypeDecl.map(_.fullName).toSeq)
+    scope.addVariableReference(
+      metadataCallRecThisNode.name,
+      metadataCallRecThisNode,
+      Defines.Any,
+      EvaluationStrategies.BY_REFERENCE
+    )
+
+    val designTypeLiteralNode = literalNode(tsMethodNodeInfo, "'design:type'", Defines.String)
+    val functionLiteralNode   = literalNode(tsMethodNodeInfo, "Function", Defines.Any)
+    val metadataCallType      =
+      callNode(
+        tsMethodNodeInfo,
+        s"""__metadata("design:type", Function)""",
+        "__metadata",
+        DispatchTypes.DYNAMIC_DISPATCH
+      )
+    val metadataTypeArgAsts = Seq(Ast(designTypeLiteralNode), Ast(functionLiteralNode))
+    callAst(
+      metadataCallType,
+      metadataTypeArgAsts,
+      receiver = Option(Ast(metadataCallRecNode)),
+      base = Option(Ast(metadataCallRecThisNode))
+    )
+  }
+
+  private def createMetadataCallParamTypesAst(tsMethodNodeInfo: BabelNode, numParams: Int): Ast = {
+    val metadataCallRecNode = identifierNode(tsMethodNodeInfo, "__metadata")
+    scope.addVariableReference(
+      metadataCallRecNode.name,
+      metadataCallRecNode,
+      Defines.Any,
+      EvaluationStrategies.BY_REFERENCE
+    )
+    val metadataCallThisNode =
+      identifierNode(tsMethodNodeInfo, "this").dynamicTypeHintFullName(rootTypeDecl.map(_.fullName).toSeq)
+    scope.addVariableReference(
+      metadataCallThisNode.name,
+      metadataCallThisNode,
+      Defines.Any,
+      EvaluationStrategies.BY_REFERENCE
+    )
+
+    val designParamTypeLiteralNode = literalNode(tsMethodNodeInfo, "'design:paramtypes'", Defines.String)
+
+    val objectLiteralNode = literalNode(tsMethodNodeInfo, "Object", Defines.Object)
+
+    val blockNode_ = blockNode(tsMethodNodeInfo)
+    scope.pushNewBlockScope(blockNode_)
+    localAstParentStack.push(blockNode_)
+
+    val tmpName      = generateUnusedVariableName(usedVariableNames, "_tmp")
+    val localTmpNode = localNode(tsMethodNodeInfo, tmpName, tmpName, Defines.Any).order(0)
+    val tmpArrayNode = identifierNode(tsMethodNodeInfo, tmpName)
+    diffGraph.addEdge(localAstParentStack.head, localTmpNode, EdgeTypes.AST)
+    scope.addVariableReference(tmpName, tmpArrayNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+
+    val arrayCallNode =
+      callNode(
+        tsMethodNodeInfo,
+        s"${EcmaBuiltins.arrayFactory}()",
+        EcmaBuiltins.arrayFactory,
+        DispatchTypes.STATIC_DISPATCH
+      )
+
+    val lineNumber                 = tsMethodNodeInfo.lineNumber
+    val columnNumber               = tsMethodNodeInfo.columnNumber
+    val assignmentCode             = s"${localTmpNode.code} = ${arrayCallNode.code}"
+    val assignmentTmpArrayCallNode =
+      createAssignmentCallAst(tmpArrayNode, arrayCallNode, assignmentCode, lineNumber, columnNumber)
+
+    val elementAsts = (0 until numParams).toList.map { _ =>
+      val objectLiteralNode = literalNode(tsMethodNodeInfo, "Object", Defines.Object)
+      val pushCallNode      = callNode(tsMethodNodeInfo, s"$tmpName.push(Object)", "", DispatchTypes.DYNAMIC_DISPATCH)
+
+      val baseNode     = identifierNode(tsMethodNodeInfo, tmpName)
+      val memberNode   = fieldIdentifierNode(tsMethodNodeInfo, "push", "push")
+      val receiverNode =
+        createFieldAccessCallAst(baseNode, memberNode, tsMethodNodeInfo.lineNumber, tsMethodNodeInfo.columnNumber)
+      val thisPushNode = identifierNode(tsMethodNodeInfo, tmpName)
+      callAst(
+        pushCallNode,
+        List(Ast(objectLiteralNode)),
+        receiver = Option(receiverNode),
+        base = Option(Ast(thisPushNode))
+      )
+    }
+
+    val tmpArrayReturnNode = identifierNode(tsMethodNodeInfo, tmpName)
+
+    scope.popScope()
+    localAstParentStack.pop()
+
+    val blockChildrenAsts = assignmentTmpArrayCallNode +: elementAsts :+ Ast(tmpArrayReturnNode)
+    val blockAst_         = blockAst(blockNode_, blockChildrenAsts)
+
+    val metadataParamTypeCall =
+      callNode(
+        tsMethodNodeInfo,
+        s"""__metadata("design:paramtypes", [${List.fill(numParams)("Object").mkString(",")}])""",
+        "__metadata",
+        DispatchTypes.DYNAMIC_DISPATCH
+      )
+    val metadataTypeArgAsts = Seq(Ast(designParamTypeLiteralNode), blockAst_)
+    callAst(
+      metadataParamTypeCall,
+      metadataTypeArgAsts,
+      receiver = Option(Ast(metadataCallRecNode)),
+      base = Option(Ast(metadataCallThisNode))
+    )
+  }
+
+  private def createMetadataCallReturnTypeAst(tsMethodNodeInfo: BabelNode, tpe: String): Ast = {
+    val metadataCallRecNode = identifierNode(tsMethodNodeInfo, "__metadata")
+    scope.addVariableReference(
+      metadataCallRecNode.name,
+      metadataCallRecNode,
+      Defines.Any,
+      EvaluationStrategies.BY_REFERENCE
+    )
+    val metadataCallTypeRecThisNode =
+      identifierNode(tsMethodNodeInfo, "this").dynamicTypeHintFullName(rootTypeDecl.map(_.fullName).toSeq)
+    scope.addVariableReference(
+      metadataCallTypeRecThisNode.name,
+      metadataCallTypeRecThisNode,
+      Defines.Any,
+      EvaluationStrategies.BY_REFERENCE
+    )
+
+    val designTypeLiteralNode = literalNode(tsMethodNodeInfo, "'design:returntype'", Defines.String)
+    val tpeLiteralNode        = literalNode(tsMethodNodeInfo, tpe, Defines.Any)
+    val metadataCallType      =
+      callNode(tsMethodNodeInfo, s"""__metadata("design:type", $tpe)""", "__metadata", DispatchTypes.DYNAMIC_DISPATCH)
+    val metadataTypeArgAsts = Seq(Ast(designTypeLiteralNode), Ast(tpeLiteralNode))
+    callAst(
+      metadataCallType,
+      metadataTypeArgAsts,
+      receiver = Option(Ast(metadataCallRecNode)),
+      base = Option(Ast(metadataCallTypeRecThisNode))
+    )
+  }
+
+  private def createPropertyDecorationAsts(
+    members: Seq[BabelNode],
+    classNodeInfo: BabelNode,
+    classIdNode: NewIdentifier
+  ): Seq[Ast] = {
+    val tsProperties = members.collect {
+      case property: (ClassProperty | ClassAccessorProperty | ClassPrivateProperty) => property
+    }
+
+    tsProperties.map { tsPropertyNodeInfo =>
+      val decoratorAsts = decoratorExpressionElements(tsPropertyNodeInfo).map(astForNodeWithFunctionReference)
+      if (decoratorAsts.nonEmpty) {
+        val name = tsPropertyNodeInfo match {
+          case property: ClassProperty         => property.key.code
+          case property: ClassAccessorProperty => property.key.code
+          case property: ClassPrivateProperty  => property.key.code
+        }
+        val propertyTpe = typeFor(tsPropertyNodeInfo)
+
+        val receiverNode = identifierNode(classNodeInfo, "__decorate")
+        scope.addVariableReference(receiverNode.name, receiverNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+        val thisNode = identifierNode(classNodeInfo, "this").dynamicTypeHintFullName(rootTypeDecl.map(_.fullName).toSeq)
+        scope.addVariableReference(thisNode.name, thisNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+
+        val classPrototypeAccessAst = createFieldAccessCallAst(
+          identifierNode(classNodeInfo, classIdNode.name),
+          fieldIdentifierNode(classNodeInfo, "prototype", "prototype"),
+          classNodeInfo.lineNumber,
+          classNodeInfo.columnNumber
+        )
+        val propertyNameNode = literalNode(tsPropertyNodeInfo, s"'$name'", Defines.String)
+        val voidCallNode_    = voidCallNode(line(tsPropertyNodeInfo), column(tsPropertyNodeInfo))
+
+        val arg1Code         = decoratorAsts.flatMap(_.root.map(codeOf)).mkString(",")
+        val decorateCallCode =
+          s"__decorate([$arg1Code], ${codeOf(classPrototypeAccessAst.nodes.head)}, ${propertyNameNode.code}, ${voidCallNode_.code})"
+
+        val decorateCallNode = callNode(classNodeInfo, decorateCallCode, "__decorate", DispatchTypes.DYNAMIC_DISPATCH)
+        val subAst           = astForDecorateArray(classNodeInfo, decoratorAsts)
+        callAst(
+          decorateCallNode,
+          subAst +: Seq(classPrototypeAccessAst, Ast(propertyNameNode), Ast(voidCallNode_)),
+          receiver = Option(Ast(receiverNode)),
+          base = Option(Ast(thisNode))
+        )
+      } else {
+        Ast()
+      }
+    }
+  }
+
+  private def createMethodDecorationAsts(
+    members: Seq[BabelNode],
+    classNodeInfo: BabelNode,
+    classIdNode: NewIdentifier
+  ): Seq[Ast] = {
+    val tsMethods = members.collect { case method: ClassMethod => method }
+
+    tsMethods.map { tsMethodNodeInfo =>
+      val decoratorAsts      = decoratorExpressionElements(tsMethodNodeInfo).map(astForNodeWithFunctionReference)
+      val (name, fullName)   = calcMethodNameAndFullName(tsMethodNodeInfo)
+      val methodTpe          = typeFor(tsMethodNodeInfo).stripPrefix("__ecma.")
+      val paramNodeInfos     = paramsOf(tsMethodNodeInfo)
+      val paramDecoratorAsts = paramNodeInfos.zipWithIndex.flatMap { case (paramNodeInfo, idx) =>
+        val paramAsts = decoratorExpressionElements(paramNodeInfo).map(astForNodeWithFunctionReference)
+
+        if (paramAsts.isEmpty) {
+          Seq.empty
+        } else {
+          paramAsts.map { paramAst =>
+            val receiverNode = identifierNode(paramNodeInfo, "__param")
+            scope.addVariableReference(receiverNode.name, receiverNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+            val thisNode =
+              identifierNode(paramNodeInfo, "this").dynamicTypeHintFullName(rootTypeDecl.map(_.fullName).toSeq)
+            scope.addVariableReference(thisNode.name, thisNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+
+            val callNode_ = callNode(
+              paramNodeInfo,
+              s"__param($idx, ${codeOf(paramAst.nodes.head)})",
+              "__param",
+              DispatchTypes.DYNAMIC_DISPATCH
+            )
+            val idxNode              = literalNode(paramNodeInfo, s"$idx", Defines.Number)
+            val argAsts              = Seq(Ast(idxNode), paramAst)
+            val paramDecorateCallAst =
+              callAst(callNode_, argAsts, receiver = Option(Ast(receiverNode)), base = Option(Ast(thisNode)))
+            paramDecorateCallAst
+          }
+        }
+      }
+
+      if (decoratorAsts.nonEmpty || paramDecoratorAsts.nonEmpty) {
+        val receiverNode = identifierNode(classNodeInfo, "__decorate")
+        scope.addVariableReference(receiverNode.name, receiverNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+        val thisNode = identifierNode(classNodeInfo, "this").dynamicTypeHintFullName(rootTypeDecl.map(_.fullName).toSeq)
+        scope.addVariableReference(thisNode.name, thisNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+
+        val classPrototypeAccessAst = createFieldAccessCallAst(
+          identifierNode(classNodeInfo, classIdNode.name),
+          fieldIdentifierNode(classNodeInfo, "prototype", "prototype"),
+          classNodeInfo.lineNumber,
+          classNodeInfo.columnNumber
+        )
+        val functionNameNode          = literalNode(tsMethodNodeInfo, s"'$name'", Defines.String)
+        val nullNode                  = literalNode(tsMethodNodeInfo, "null", Defines.Null)
+        val metadataCallTypeAst       = createMetadataCallTypeAst(tsMethodNodeInfo)
+        val metadataCallParamTypesAst = createMetadataCallParamTypesAst(tsMethodNodeInfo, paramNodeInfos.size)
+        val metadataCallReturnTypeAst = createMetadataCallReturnTypeAst(tsMethodNodeInfo, methodTpe)
+
+        val arg1Code         = decoratorAsts.flatMap(_.root.map(codeOf)).mkString(",")
+        val arg2Code         = paramDecoratorAsts.flatMap(_.root.map(codeOf)).mkString(",")
+        val arg3Code         = codeOf(metadataCallTypeAst.root.get)
+        val arg4Code         = codeOf(metadataCallParamTypesAst.root.get)
+        val arg5Code         = codeOf(metadataCallReturnTypeAst.root.get)
+        val decorateCallCode =
+          s"__decorate([$arg1Code, $arg2Code, $arg3Code, $arg4Code, $arg5Code], ${codeOf(classPrototypeAccessAst.nodes.head)}, ${functionNameNode.code}, null)"
+
+        val decorateCallNode = callNode(classNodeInfo, decorateCallCode, "__decorate", DispatchTypes.DYNAMIC_DISPATCH)
+        val subAst           = astForDecorateArray(
+          classNodeInfo,
+          decoratorAsts ++ paramDecoratorAsts ++ Seq(
+            metadataCallTypeAst,
+            metadataCallParamTypesAst,
+            metadataCallReturnTypeAst
+          )
+        )
+        callAst(
+          decorateCallNode,
+          subAst +: Seq(classPrototypeAccessAst, Ast(functionNameNode), Ast(nullNode)),
+          receiver = Option(Ast(receiverNode)),
+          base = Option(Ast(thisNode))
+        )
+      } else {
+        Ast()
+      }
+    }
+  }
+
+  private def astForDecorateArray(classNodeInfo: BabelNode, decoratorAsts: List[Ast]): Ast = {
+    val blockNode_ = blockNode(classNodeInfo)
+    scope.pushNewBlockScope(blockNode_)
+    localAstParentStack.push(blockNode_)
+
+    val tmpName      = generateUnusedVariableName(usedVariableNames, "_tmp")
+    val localTmpNode = localNode(classNodeInfo, tmpName, tmpName, Defines.Any).order(0)
+    val tmpArrayNode = identifierNode(classNodeInfo, tmpName)
+    diffGraph.addEdge(localAstParentStack.head, localTmpNode, EdgeTypes.AST)
+    scope.addVariableReference(tmpName, tmpArrayNode, Defines.Any, EvaluationStrategies.BY_REFERENCE)
+
+    val arrayCallNode =
+      callNode(
+        classNodeInfo,
+        s"${EcmaBuiltins.arrayFactory}()",
+        EcmaBuiltins.arrayFactory,
+        DispatchTypes.STATIC_DISPATCH
+      )
+
+    val lineNumber                 = classNodeInfo.lineNumber
+    val columnNumber               = classNodeInfo.columnNumber
+    val assignmentCode             = s"${localTmpNode.code} = ${arrayCallNode.code}"
+    val assignmentTmpArrayCallNode =
+      createAssignmentCallAst(tmpArrayNode, arrayCallNode, assignmentCode, lineNumber, columnNumber)
+
+    val elementAsts = decoratorAsts.map { ast =>
+      val elementCode  = ast.root.map(codeOf).getOrElse(PropertyDefaults.Code)
+      val pushCallNode = callNode(classNodeInfo, s"$tmpName.push($elementCode)", "", DispatchTypes.DYNAMIC_DISPATCH)
+
+      val baseNode     = identifierNode(classNodeInfo, tmpName)
+      val memberNode   = fieldIdentifierNode(classNodeInfo, "push", "push")
+      val receiverNode =
+        createFieldAccessCallAst(baseNode, memberNode, classNodeInfo.lineNumber, classNodeInfo.columnNumber)
+      val thisPushNode = identifierNode(classNodeInfo, tmpName)
+      callAst(pushCallNode, List(ast), receiver = Option(receiverNode), base = Option(Ast(thisPushNode)))
+    }
+
+    val tmpArrayReturnNode = identifierNode(classNodeInfo, tmpName)
+
+    scope.popScope()
+    localAstParentStack.pop()
+
+    val blockChildrenAsts = assignmentTmpArrayCallNode +: elementAsts :+ Ast(tmpArrayReturnNode)
+    blockAst(blockNode_, blockChildrenAsts)
+  }
+
+  private def hasPrivateKey(member: BabelNode): Boolean = member match {
+    case _: ClassPrivateProperty  => true
+    case n: ClassAccessorProperty => n.key.isInstanceOf[PrivateName]
+    case _                        => false
+  }
+
+  protected def addModifier(node: NewNode, member: BabelNode): Unit = member match {
+    case _ if hasPrivateKey(member) =>
+      if (staticOf(member)) {
+        diffGraph.addEdge(node, NewModifier().modifierType(ModifierTypes.STATIC), EdgeTypes.AST)
+      }
+      diffGraph.addEdge(node, NewModifier().modifierType(ModifierTypes.PRIVATE), EdgeTypes.AST)
+    case _ =>
+      if (abstractOf(member))
+        diffGraph.addEdge(node, NewModifier().modifierType(ModifierTypes.ABSTRACT), EdgeTypes.AST)
+      if (staticOf(member))
+        diffGraph.addEdge(node, NewModifier().modifierType(ModifierTypes.STATIC), EdgeTypes.AST)
+      if (readonlyOf(member))
+        diffGraph.addEdge(node, NewModifier().modifierType(ModifierTypes.READONLY), EdgeTypes.AST)
+      accessibilityOf(member).foreach {
+        case "public"    => diffGraph.addEdge(node, NewModifier().modifierType(ModifierTypes.PUBLIC), EdgeTypes.AST)
+        case "private"   => diffGraph.addEdge(node, NewModifier().modifierType(ModifierTypes.PRIVATE), EdgeTypes.AST)
+        case "protected" => diffGraph.addEdge(node, NewModifier().modifierType(ModifierTypes.PROTECTED), EdgeTypes.AST)
+        case _           =>
+      }
+  }
+
+  /** The first and the remaining identifiers of a module name: `A.B.C` is one `TSQualifiedName`, a plain name or a
+    * string is a single part.
+    */
+  private def moduleNameParts(id: BabelNode): (BabelNode, List[BabelNode]) = id match {
+    case qualified: TSQualifiedName =>
+      val (first, rest) = moduleNameParts(qualified.left)
+      (first, rest :+ qualified.right)
+    case other => (other, Nil)
+  }
+
+  protected def astForModule(tsModuleDecl: TSModuleDeclaration): Ast = {
+    val (first, nested) = moduleNameParts(tsModuleDecl.id)
+    astForModulePart(tsModuleDecl, tsModuleDecl, first, nested)
+  }
+
+  /** `namespace A.B.C {}` is a single declaration, but stands for the namespaces A, B and C nested in each other. The
+    * namespace of a `part` spans from the start of `from` (the declaration itself for the first part, else the part) to
+    * the end of the declaration.
+    */
+  private def astForModulePart(
+    tsModuleDecl: TSModuleDeclaration,
+    from: BabelNode,
+    part: BabelNode,
+    nested: List[BabelNode]
+  ): Ast = {
+    val (name, fullName) = calcTypeNameAndFullName(tsModuleDecl, Some(part.code))
+    registerType(fullName)
+
+    val namespaceNode = NewNamespaceBlock()
+      .code(codeBetween(from, tsModuleDecl))
+      .lineNumber(from.lineNumber)
+      .columnNumber(from.columnNumber)
+      .filename(parserResult.filename)
+      .name(name)
+      .fullName(fullName)
+
+    methodAstParentStack.push(namespaceNode)
+    dynamicInstanceTypeStack.push(fullName)
+
+    scope.pushNewMethodScope(fullName, name, namespaceNode, None)
+
+    val blockAst = nested match {
+      case next :: rest => astForModulePart(tsModuleDecl, next, next, rest)
+      // ambient module declarations like `declare module "foo";` have no body at all
+      case Nil => tsModuleDecl.body.map(astForBlockStatement).getOrElse(Ast())
+    }
+
+    methodAstParentStack.pop()
+    dynamicInstanceTypeStack.pop()
+    scope.popScope()
+
+    Ast(namespaceNode).withChild(blockAst)
+  }
+
+  protected def astForInterface(tsInterface: TSInterfaceDeclaration): Ast = {
+    val (typeName, typeFullName) = calcTypeNameAndFullName(tsInterface)
+    registerType(typeFullName)
+
+    val astParentType     = methodAstParentStack.head.label
+    val astParentFullName = methodAstParentStack.head.properties(PropertyNames.FullName).toString
+
+    val extendz = tsInterface.`extends`.map(_.code)
+
+    val typeDeclNode_ = typeDeclNode(
+      tsInterface,
+      typeName,
+      typeFullName,
+      parserResult.filename,
+      s"interface $typeName",
+      astParentType,
+      astParentFullName,
+      inherits = extendz
+    )
+    seenAliasTypes.update(typeDeclNode_.name, typeDeclNode_)
+
+    addModifier(typeDeclNode_, tsInterface)
+
+    methodAstParentStack.push(typeDeclNode_)
+    dynamicInstanceTypeStack.push(typeFullName)
+
+    scope.pushNewMethodScope(typeFullName, typeName, typeDeclNode_, None)
+
+    val constructorNode = interfaceConstructor(typeName, tsInterface)
+    diffGraph.addEdge(constructorNode, NewModifier().modifierType(ModifierTypes.CONSTRUCTOR), EdgeTypes.AST)
+
+    val memberNode_ =
+      memberNode(tsInterface, constructorNode.name, constructorNode.code, typeFullName, Seq(constructorNode.fullName))
+    diffGraph.addEdge(typeDeclNode_, memberNode_, EdgeTypes.AST)
+
+    val interfaceBodyElements = classMembers(tsInterface, withConstructor = false)
+
+    interfaceBodyElements.foreach { classElement =>
+      val tpe           = typeFor(classElement)
+      val possibleTypes = Seq(tpe)
+      val typeFullName  = if (Defines.isBuiltinType(tpe)) tpe else Defines.Any
+      val memberNodes   = classElement match {
+        case function: (TSCallSignatureDeclaration | TSMethodSignature) =>
+          val functionNode = createMethodDefinitionNode(function, ConstructorContent.empty)
+          addModifier(functionNode, function)
+          Seq(
+            memberNode(function, functionNode.name, function.code, typeFullName, Seq(functionNode.fullName))
+              .possibleTypes(possibleTypes)
+          )
+        case _ =>
+          val names = classElement match {
+            case property: TSPropertySignature =>
+              property.key match {
+                case literal: StringLiteral => Seq(literal.value)
+                case key                    => Seq(key.code)
+              }
+            case index: TSIndexSignature => index.parameters.map(_.name)
+            // TODO: name field most likely needs adjustment for other Babel AST types
+            case _ => Seq(classElement.code)
+          }
+          names.map { n =>
+            val node = memberNode(classElement, n, classElement.code, typeFullName).possibleTypes(possibleTypes)
+            addModifier(node, classElement)
+            node
+          }
+      }
+      memberNodes.foreach(diffGraph.addEdge(typeDeclNode_, _, EdgeTypes.AST))
+    }
+
+    methodAstParentStack.pop()
+    dynamicInstanceTypeStack.pop()
+    scope.popScope()
+
+    Ast(typeDeclNode_)
+  }
+
+}

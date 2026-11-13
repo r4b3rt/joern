@@ -1,20 +1,12 @@
 package io.joern.ghidra2cpg.passes
 
-import io.shiftleft.codepropertygraph.Cpg
+import io.shiftleft.codepropertygraph.generated.Cpg
 import io.shiftleft.codepropertygraph.generated.{Languages, nodes}
-import io.shiftleft.passes.{DiffGraph, IntervalKeyPool, ParallelCpgPass}
+import io.shiftleft.passes.CpgPass
 
-class MetaDataPass(filename: String, cpg: Cpg, keyPool: IntervalKeyPool)
-    extends ParallelCpgPass[String](
-      cpg,
-      keyPools = Some(keyPool.split(1))
-    ) {
+class MetaDataPass(filename: String, cpg: Cpg) extends CpgPass(cpg) {
 
-  override def partIterator: Iterator[String] = List("").iterator
-
-  override def runOnPart(part: String): Iterator[DiffGraph] = {
-    implicit val diffGraph: DiffGraph.Builder = DiffGraph.newBuilder
-
+  override def run(diffGraph: DiffGraphBuilder): Unit = {
     diffGraph.addNode(
       nodes
         .NewTypeDecl()
@@ -27,9 +19,8 @@ class MetaDataPass(filename: String, cpg: Cpg, keyPool: IntervalKeyPool)
       nodes
         .NewMetaData()
         .language(Languages.GHIDRA)
-        .version("0.1")
+        .version(classOf[MetaDataPass].getPackage.getImplementationVersion)
     )
-
-    Iterator(diffGraph.build())
   }
+
 }

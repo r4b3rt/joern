@@ -1,9 +1,10 @@
 package io.joern.javasrc2cpg.querying.dataflow
 
 import io.joern.javasrc2cpg.testfixtures.JavaDataflowFixture
-import io.joern.dataflowengineoss.language._
+import io.joern.dataflowengineoss.language.*
+import io.shiftleft.semanticcpg.language.*
 
-import scala.jdk.CollectionConverters._
+import scala.jdk.CollectionConverters.*
 class ArrayTests extends JavaDataflowFixture {
 
   behavior of "Dataflow through arrays"
@@ -93,6 +94,14 @@ class ArrayTests extends JavaDataflowFixture {
       |        String[] alias = vals;
       |        System.out.println(alias[2]);
       |    }
+      |
+      |    public static String[] source() { return new String[]{"MALICIOUS"}; }
+      |    public static void sink(int x) {}
+      |
+      |    public void test14() {
+      |        String[] vals = source();
+      |        sink(vals.length);
+      |    }
       |   }
       |""".stripMargin
 
@@ -140,15 +149,12 @@ class ArrayTests extends JavaDataflowFixture {
 
   it should "find a path if sink is in a `FOREACH` loop over `MALICIOUS` array" in {
     val (source, sink) = getConstSourceSink("test9")
-    // The behaviour of javasrc2cpg currently matches c2cpg (neither of which find a path here.
-    // TODO: Fix dataflow through foreach constructs for both this and c2cpg
-    sink.reachableBy(source).size shouldBe 0
+    sink.reachableBy(source).size shouldBe 1
   }
 
   it should "find a path if `MALICIOUS` is added to an accumulator in a loop" in {
     val (source, sink) = getConstSourceSink("test10")
-    // TODO: Fix dataflow through foreach constructs for both this and c2cpg
-    sink.reachableBy(source).size shouldBe 0
+    sink.reachableBy(source).size shouldBe 1
   }
 
   it should "find a path if `MALICIOUS` is assigned to safe array and printed" in {
@@ -164,5 +170,11 @@ class ArrayTests extends JavaDataflowFixture {
   it should "find a path through an array alias" in {
     val (source, sink) = getConstSourceSink("test13")
     sink.reachableBy(source).size shouldBe 2
+  }
+
+  it should "not find a path from array to its length" in {
+    def source = cpg.method.name("test14").call.name("source")
+    def sink   = cpg.method.name("test14").call.name("sink").argument(1)
+    sink.reachableBy(source).size shouldBe 0
   }
 }
